@@ -32,7 +32,7 @@ joint_names = [
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--object_code', type=str, default='ddg-gd_banana_poisson_002')
+    parser.add_argument('--object_code', type=str, default='core-mug-8570d9a8d24cb0acbebd3c0c0c70fb03')
     parser.add_argument('--num', type=int, default=0)
     parser.add_argument('--result_path', type=str, default='../data/graspdata')
     args = parser.parse_args()
@@ -91,4 +91,4 @@ if __name__ == '__main__':
         result = f'Index {args.num}  E_fc {E_fc}  E_dis {E_dis}  E_pen {E_pen}'
         fig.add_annotation(text=result, x=0.5, y=0.1, xref='paper', yref='paper')
     fig.update_layout(scene_aspectmode='data')
-    fig.show()
+    fig.write_html("grasp_result.html", auto_open=False)
