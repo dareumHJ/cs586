@@ -8,3 +8,4 @@ dataset
 __pycache__
 
 grasp_generation/result/
+data/

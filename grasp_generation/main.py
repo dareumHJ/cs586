@@ -30,7 +30,7 @@ from utils.rot6d import robust_compute_rotation_matrix_from_ortho6d
 parser = argparse.ArgumentParser()
 # experiment settings
 parser.add_argument('--seed', default=1, type=int)
-parser.add_argument('--gpu', default="2", type=str)
+parser.add_argument('--gpu', default="0", type=str)
 parser.add_argument('--object_code_list', default=
     [
         'sem-Car-2f28e2bd754977da8cfac9da0ff28f62',
