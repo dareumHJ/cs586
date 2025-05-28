@@ -18,6 +18,8 @@ import math
 import random
 import transforms3d
 import wandb
+import time
+import logging
 
 # from utils.hand_model import HandModel
 from utils.bimanual_hand_model import BimanualHandModel
@@ -49,20 +51,31 @@ class BimanualAnnealing:
         self.prev_pose = None
         
     def try_step(self):
-        # Save current pose for potential rollback (detach to avoid gradient issues)
-        self.prev_pose = self.bimanual_hand_model.bimanual_pose.detach().clone()
+        # Save current pose for potential rollback (keep gradient)
+        self.prev_pose = self.bimanual_hand_model.bimanual_pose.clone()
         
         # Generate random step for bimanual pose
         batch_size = self.bimanual_hand_model.bimanual_pose.shape[0]
         step = torch.randn_like(self.bimanual_hand_model.bimanual_pose) * self.config['step_size']
         
-        # Apply step with gradient consideration
+        # Apply step with gradient consideration (with proper scaling)
         if self.bimanual_hand_model.bimanual_pose.grad is not None:
-            step -= self.config['mu'] * self.bimanual_hand_model.bimanual_pose.grad * self.config['step_size']
+            # Normalize gradient to prevent extremely large steps
+            grad = self.bimanual_hand_model.bimanual_pose.grad
+            grad_norm = torch.norm(grad, dim=1, keepdim=True)
+            
+            # Clip gradient norm to reasonable values
+            max_grad_norm = 10.0  # Maximum allowed gradient norm per batch
+            grad_norm_clipped = torch.clamp(grad_norm, max=max_grad_norm)
+            
+            # Normalize gradient and scale properly
+            grad_normalized = grad / (grad_norm + 1e-8) * grad_norm_clipped
+            
+            # Apply gradient-based step with much smaller mu for stability
+            step -= self.config['mu'] * grad_normalized * self.config['step_size']
         
-        # Update pose in-place to maintain gradient tracking
-        with torch.no_grad():
-            self.bimanual_hand_model.bimanual_pose.add_(step)
+        # Update pose while maintaining gradient tracking using in-place operation
+        self.bimanual_hand_model.bimanual_pose.data.add_(step)
         
         # Update hand model with new pose
         self.bimanual_hand_model.set_parameters(self.bimanual_hand_model.bimanual_pose, 
@@ -79,10 +92,11 @@ class BimanualAnnealing:
         random_vals = torch.rand(batch_size, device=self.device)
         accept = (random_vals < accept_prob) | (energy_diff <= 0)
         
-        # Rollback rejected steps only (accepted steps are already applied)
+        # Rollback rejected steps only (without breaking gradient)
         if (~accept).any():
-            with torch.no_grad():
-                self.bimanual_hand_model.bimanual_pose[~accept] = self.prev_pose[~accept]
+            # Use in-place operation to maintain gradient tracking
+            reject_mask = ~accept
+            self.bimanual_hand_model.bimanual_pose.data[reject_mask] = self.prev_pose.data[reject_mask]
             
             # Re-set parameters to ensure consistency
             self.bimanual_hand_model.set_parameters(self.bimanual_hand_model.bimanual_pose, 
@@ -100,11 +114,48 @@ class BimanualAnnealing:
             self.bimanual_hand_model.bimanual_pose.grad.zero_()
 
 
+def setup_logging(worker_id):
+    """Setup logging to file"""
+    log_filename = f"bimanual_optimization_worker_{worker_id}.log"
+    
+    # Remove existing log file
+    if os.path.exists(log_filename):
+        os.remove(log_filename)
+    
+    # Setup logger
+    logger = logging.getLogger(f'worker_{worker_id}')
+    logger.setLevel(logging.INFO)
+    
+    # Clear existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # File handler
+    file_handler = logging.FileHandler(log_filename, mode='w')
+    file_handler.setLevel(logging.INFO)
+    
+    # Formatter
+    formatter = logging.Formatter('%(asctime)s - Worker %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(formatter)
+    
+    logger.addHandler(file_handler)
+    
+    return logger
+
+
 def generate(args_list):
     args, object_code_list, id, gpu_list = args_list
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    
+    # Setup logging
+    logger = setup_logging(id)
+    logger.info(f"Starting bimanual grasp generation for worker {id}")
+    logger.info(f"Objects: {object_code_list}")
+    logger.info(f"Configuration: batch_size_each={args.batch_size_each}, n_iter={args.n_iter}")
+    logger.info(f"Hyperparameters: mu={args.mu}, step_size={args.step_size}, starting_temp={args.starting_temperature}")
+    logger.info(f"Energy weights: w_dis={args.w_dis}, w_pen={args.w_pen}, w_spen={args.w_spen}, w_joints={args.w_joints}, w_bimpen={args.w_bimpen}, w_vew={args.w_vew}")
     
     # Initialize wandb for this worker
     if not args.disable_wandb:
@@ -167,6 +218,8 @@ def generate(args_list):
     os.environ['CUDA_VISIBLE_DEVICES'] = gpu_list[worker - 1]
     device = torch.device('cuda')
 
+    logger.info(f"Using GPU: {gpu_list[worker - 1]}")
+
     # Create bimanual hand model with minimal surface points for memory efficiency
     bimanual_hand_model = BimanualHandModel(
         mjcf_path='mjcf/shadow_hand_wrist_free.xml',
@@ -191,6 +244,24 @@ def generate(args_list):
     bimanual_hand_model.bimanual_pose.requires_grad_(True)  # 이건 왜?
     bimanual_pose_st = bimanual_hand_model.bimanual_pose.detach().clone()
 
+    logger.info(f"Initial pose shape: {bimanual_hand_model.bimanual_pose.shape}")
+    logger.info(f"Initial pose requires_grad: {bimanual_hand_model.bimanual_pose.requires_grad}")
+    
+    # DEBUG: Check contact points initialization
+    if bimanual_hand_model.contact_point_indices is not None:
+        logger.info(f"Contact point indices shape: {bimanual_hand_model.contact_point_indices.shape}")
+        logger.info(f"Contact point indices range: [{bimanual_hand_model.contact_point_indices.min().item()}, {bimanual_hand_model.contact_point_indices.max().item()}]")
+        logger.info(f"Left hand contact candidates: {bimanual_hand_model.left_hand.n_contact_candidates}")
+        logger.info(f"Right hand contact candidates: {bimanual_hand_model.right_hand.n_contact_candidates}")
+    else:
+        logger.error("CRITICAL: Contact point indices are None!")
+        
+    if bimanual_hand_model.contact_points is not None:
+        logger.info(f"Contact points shape: {bimanual_hand_model.contact_points.shape}")
+        logger.info(f"Contact points mean: {bimanual_hand_model.contact_points.mean(dim=[0,1])}")
+    else:
+        logger.error("CRITICAL: Contact points are None!")
+
     optim_config = {
         'switch_possibility': args.switch_possibility,
         'starting_temperature': args.starting_temperature,
@@ -214,13 +285,45 @@ def generate(args_list):
         w_vew=args.w_vew,        # NEW: Wrench ellipse volume
     )
     
-    # Calculate initial energy
+    # IMPORTANT: Reset gradient to None before initial calculation
+    bimanual_hand_model.bimanual_pose.grad = None
+    
+    # Calculate initial energy with proper gradient tracking
     energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = cal_bimanual_energy(
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
-    energy.sum().backward(retain_graph=True)
+    # Ensure gradient calculation is working by computing scalar loss
+    total_loss = energy.sum()
+    total_loss.backward(retain_graph=True)
     
-    # Log initial energy values
+    # Check initial gradient
+    initial_grad_norm = 0.0
+    if bimanual_hand_model.bimanual_pose.grad is not None:
+        initial_grad_norm = torch.norm(bimanual_hand_model.bimanual_pose.grad).item()
+        logger.info(f"Initial gradient norm: {initial_grad_norm}")
+        print(f"Initial gradient norm: {initial_grad_norm}")
+    else:
+        logger.error("CRITICAL: No gradient computed for initial pose! Check energy calculation.")
+        print("CRITICAL ERROR: No gradient computed for initial pose!")
+        
+        # Try to debug what's wrong
+        logger.info(f"Energy requires_grad: {energy.requires_grad}")
+        logger.info(f"Pose requires_grad: {bimanual_hand_model.bimanual_pose.requires_grad}")
+        
+        # Force gradient calculation
+        dummy_loss = bimanual_hand_model.bimanual_pose.sum()
+        dummy_loss.backward()
+        if bimanual_hand_model.bimanual_pose.grad is not None:
+            logger.info(f"Dummy gradient norm: {torch.norm(bimanual_hand_model.bimanual_pose.grad).item()}")
+        else:
+            logger.error("Even dummy gradient failed!")
+    
+    logger.info(f"Initial energy - Total: {energy.mean().item():.4f}, FC: {E_fc.mean().item():.4f}, Dis: {E_dis.mean().item():.4f}")
+    
+    # Clear gradients before starting optimization
+    optimizer.zero_grad()
+    
+    # Log initial energy values after gradient check
     if not args.disable_wandb:
         wandb.log({
             "initial/total_energy_mean": energy.mean().item(),
@@ -232,12 +335,21 @@ def generate(args_list):
             "initial/E_joints_mean": E_joints.mean().item(),
             "initial/E_bimpen_mean": E_bimpen.mean().item(),
             "initial/E_vew_mean": E_vew.mean().item(),
+            "initial/gradient_norm": initial_grad_norm,
             "step": 0
         })
 
     # Optimization loop with progress bar
     for step in tqdm(range(1, args.n_iter + 1), desc=f'Optimizing grasps (Worker {id})'):
+        # Store pose before step for comparison (WITHOUT detach to maintain gradient tracking)
+        pose_before_step = bimanual_hand_model.bimanual_pose.clone()
+        
         s = optimizer.try_step()
+        
+        # Store pose after try_step (before accept/reject decision) - keep gradients
+        pose_after_try_step = bimanual_hand_model.bimanual_pose.clone()
+        with torch.no_grad():  # Only detach for logging calculations
+            actual_step_taken = torch.norm(pose_after_try_step.detach() - pose_before_step.detach(), dim=1).mean().item()
 
         optimizer.zero_grad()
         new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew = cal_bimanual_energy(
@@ -245,28 +357,119 @@ def generate(args_list):
 
         new_energy.sum().backward(retain_graph=True)
 
-        with torch.no_grad():
-            accept, t = optimizer.accept_step(energy, new_energy)
+        # Accept step without disabling gradients
+        accept, t = optimizer.accept_step(energy, new_energy)
 
-            energy[accept] = new_energy[accept]
-            E_dis[accept] = new_E_dis[accept]
-            E_fc[accept] = new_E_fc[accept]
-            E_pen[accept] = new_E_pen[accept]
-            E_spen[accept] = new_E_spen[accept]
-            E_joints[accept] = new_E_joints[accept]
-            E_bimpen[accept] = new_E_bimpen[accept]
-            E_vew[accept] = new_E_vew[accept]
+        # Check if pose actually changed after accept/reject decision - only detach for logging
+        with torch.no_grad():
+            pose_after_step = bimanual_hand_model.bimanual_pose.clone()
+            final_pose_change = torch.norm(pose_after_step.detach() - pose_before_step.detach(), dim=1).mean().item()
+
+        # Update energy values for accepted steps only (keep gradient tracking)
+        energy = torch.where(accept, new_energy, energy)
+        E_dis = torch.where(accept, new_E_dis, E_dis)
+        E_fc = torch.where(accept, new_E_fc, E_fc)
+        E_pen = torch.where(accept, new_E_pen, E_pen)
+        E_spen = torch.where(accept, new_E_spen, E_spen)
+        E_joints = torch.where(accept, new_E_joints, E_joints)
+        E_bimpen = torch.where(accept, new_E_bimpen, E_bimpen)
+        E_vew = torch.where(accept, new_E_vew, E_vew)
+        
+        # Detailed step analysis for logging (use detach only for logging)
+        with torch.no_grad():
+            step_norm = torch.norm(s, dim=1).mean().item()
+            step_norm_std = torch.norm(s, dim=1).std().item()
+            step_norm_max = torch.norm(s, dim=1).max().item()
+            step_norm_min = torch.norm(s, dim=1).min().item()
             
-            # Log energy values and optimization metrics every few steps
-            if not args.disable_wandb and (step % args.wandb_log_freq == 0 or step == 1):
-                accept_rate = accept.float().mean().item()
+            # Gradient analysis
+            grad_norm = 0.0
+            grad_norm_std = 0.0
+            grad_norm_max = 0.0
+            grad_norm_min = 0.0
+            if bimanual_hand_model.bimanual_pose.grad is not None:
+                grad_norms = torch.norm(bimanual_hand_model.bimanual_pose.grad, dim=1)
+                grad_norm = grad_norms.mean().item()
+                grad_norm_std = grad_norms.std().item()
+                grad_norm_max = grad_norms.max().item()
+                grad_norm_min = grad_norms.min().item()
+            
+            # Energy difference analysis
+            energy_diff = new_energy - energy
+            energy_diff_mean = energy_diff.mean().item()
+            energy_diff_std = energy_diff.std().item()
+            energy_diff_min = energy_diff.min().item()
+            energy_diff_max = energy_diff.max().item()
+            
+            # Accept rate and rejection analysis
+            accept_rate = accept.float().mean().item()
+            n_accepted = accept.sum().item()
+            n_rejected = (~accept).sum().item()
+            
+            # Metropolis probability analysis
+            accept_prob = torch.exp(-energy_diff / t)
+            avg_accept_prob = accept_prob.mean().item()
+            min_accept_prob = accept_prob.min().item()
+            max_accept_prob = accept_prob.max().item()
+        
+        # Log to file every step for detailed analysis
+        if step % 10 == 0 or step <= 5:  # Log first 5 steps and every 10th step
+            logger.info(f"Step {step}: temp={t:.4f}, accept_rate={accept_rate:.3f} ({n_accepted}/{n_accepted+n_rejected})")
+            logger.info(f"  Step: norm={step_norm:.6f}, actual_taken={actual_step_taken:.6f}, final_change={final_pose_change:.6f}")
+            logger.info(f"  Grad: norm={grad_norm:.6f}")
+            logger.info(f"  Energy: old={energy.mean().item():.4f}, new={new_energy.mean().item():.4f}, diff={energy_diff_mean:.4f}")
+            logger.info(f"  Energy_diff: min={energy_diff_min:.4f}, max={energy_diff_max:.4f}")
+            logger.info(f"  Accept_prob: avg={avg_accept_prob:.6f}, min={min_accept_prob:.6f}, max={max_accept_prob:.6f}")
+            
+            # DEBUG: Log individual energy components to see what's changing
+            logger.info(f"  Energy Components - FC: {new_E_fc.mean().item():.4f}, Dis: {new_E_dis.mean().item():.4f}, Pen: {new_E_pen.mean().item():.4f}")
+            logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}")
+            
+            # DEBUG: Check if contact points are actually changing
+            if step > 1 and hasattr(bimanual_hand_model, 'contact_points') and bimanual_hand_model.contact_points is not None:
+                contact_change = torch.norm(bimanual_hand_model.contact_points - getattr(bimanual_hand_model, '_prev_contact_points', bimanual_hand_model.contact_points), dim=-1).mean().item()
+                logger.info(f"  Contact point change: {contact_change:.6f}")
+            
+            # Store contact points for next comparison
+            if hasattr(bimanual_hand_model, 'contact_points') and bimanual_hand_model.contact_points is not None:
+                bimanual_hand_model._prev_contact_points = bimanual_hand_model.contact_points.clone().detach()
+        
+        # Log energy values and optimization metrics every few steps
+        if not args.disable_wandb and (step % args.wandb_log_freq == 0 or step == 1):
+            with torch.no_grad():  # Only disable gradients for logging
                 
                 # Log current energy statistics
                 log_dict = {
                     "step": step,
                     "optimization/temperature": t,
                     "optimization/accept_rate": accept_rate,
-                    "optimization/step_norm": torch.norm(s, dim=1).mean().item(),
+                    "optimization/n_accepted": n_accepted,
+                    "optimization/n_rejected": n_rejected,
+                    
+                    # Step analysis (NEW)
+                    "optimization/step_norm": step_norm,
+                    "optimization/step_norm_std": step_norm_std,
+                    "optimization/step_norm_max": step_norm_max,
+                    "optimization/step_norm_min": step_norm_min,
+                    "optimization/actual_step_taken": actual_step_taken,
+                    "optimization/final_pose_change": final_pose_change,
+                    
+                    # Gradient analysis (NEW)
+                    "optimization/gradient_norm": grad_norm,
+                    "optimization/gradient_norm_std": grad_norm_std,
+                    "optimization/gradient_norm_max": grad_norm_max,
+                    "optimization/gradient_norm_min": grad_norm_min,
+                    
+                    # Energy difference analysis (NEW)
+                    "optimization/energy_diff_mean": energy_diff_mean,
+                    "optimization/energy_diff_std": energy_diff_std,
+                    "optimization/energy_diff_min": energy_diff_min,
+                    "optimization/energy_diff_max": energy_diff_max,
+                    
+                    # Metropolis probability analysis (NEW)
+                    "optimization/avg_accept_prob": avg_accept_prob,
+                    "optimization/min_accept_prob": min_accept_prob,
+                    "optimization/max_accept_prob": max_accept_prob,
                     
                     # Current energy means and stds
                     "energy/total_mean": energy.mean().item(),
@@ -309,6 +512,11 @@ def generate(args_list):
                 })
                 
                 wandb.log(log_dict)
+
+    # Final logging
+    logger.info(f"Optimization completed for worker {id}")
+    logger.info(f"Final energy: {energy.mean().item():.4f}, Final accept rate: {accept_rate:.3f}")
+    logger.info(f"Final gradient norm: {grad_norm:.6f}")
 
     # save results
     translation_names = ['WRJTx', 'WRJTy', 'WRJTz']
@@ -394,6 +602,8 @@ def generate(args_list):
             ))
         np.save(os.path.join(args.result_path, 'bimanual_' + object_code + '.npy'), data_list, allow_pickle=True)
 
+    logger.info(f"Results saved for {len(object_code_list)} objects")
+
     # Log final results summary
     if not args.disable_wandb:
         wandb.log({
@@ -417,6 +627,8 @@ def generate(args_list):
         
         # Close wandb run
         wandb.finish()
+    
+    logger.info("Bimanual grasp generation completed successfully")
 
 
 if __name__ == '__main__':
@@ -435,10 +647,10 @@ if __name__ == '__main__':
     parser.add_argument('--n_iter', default=6000, type=int)  # Reduced for testing bimanual
     # hyper parameters
     parser.add_argument('--switch_possibility', default=0.5, type=float)
-    parser.add_argument('--mu', default=0.98, type=float)
-    parser.add_argument('--step_size', default=0.003, type=float)  # Slightly reduced for stability
+    parser.add_argument('--mu', default=0.1, type=float)  # Reduced from 0.98 for stability with gradient clipping
+    parser.add_argument('--step_size', default=0.01, type=float)  # Increased from 0.003 since gradient is now clipped
     parser.add_argument('--stepsize_period', default=50, type=int)
-    parser.add_argument('--starting_temperature', default=20, type=float)  # Increased for bimanual
+    parser.add_argument('--starting_temperature', default=100, type=float)  # Increased for bimanual to allow more exploration
     parser.add_argument('--annealing_period', default=40, type=int)
     parser.add_argument('--temperature_decay', default=0.95, type=float)
     # Energy weights

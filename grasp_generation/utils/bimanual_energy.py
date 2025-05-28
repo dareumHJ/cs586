@@ -64,6 +64,20 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
     # E_bimpen: Inter-hand penetration (NEW)
     E_bimpen = bimanual_hand_model.inter_hand_penetration()
 
+    # Check for NaN or infinite values for debugging
+    energy_components = [E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew]
+    component_names = ['E_fc', 'E_dis', 'E_pen', 'E_spen', 'E_joints', 'E_bimpen', 'E_vew']
+    
+    for i, (component, name) in enumerate(zip(energy_components, component_names)):
+        if torch.isnan(component).any() or torch.isinf(component).any():
+            print(f"Warning: {name} contains NaN or Inf values!")
+            # Replace NaN/Inf with large finite values to continue optimization
+            energy_components[i] = torch.where(torch.isfinite(component), component, 
+                                             torch.full_like(component, 1000.0))
+
+    # Unpack cleaned components
+    E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = energy_components
+
     if verbose:
         total_energy = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew
         return total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew
@@ -183,25 +197,20 @@ def cal_joint_violations(bimanual_hand_model):
     E_joints: (B,) torch.FloatTensor
         joint limit violation energy
     """
-    # Extract joint angles for left hand: [9:31] (skip trans + rot6d)
-    left_joints = bimanual_hand_model.bimanual_pose[:, 9:31]  # (B, 22)
+    # Extract joint angles for both hands: [9:31] + [40:62] (skip trans + rot6d)
+    left_joints = bimanual_hand_model.bimanual_pose[:, 9:31]  # (B, 22) - left hand joints
+    right_joints = bimanual_hand_model.bimanual_pose[:, 40:62]  # (B, 22) - right hand joints
     
-    # Extract joint angles for right hand: [31+9:31+9+22] (skip trans + rot6d)
-    right_joints = bimanual_hand_model.bimanual_pose[:, 40:62]  # (B, 22)
+    # Combine all joint angles for both hands
+    all_joints = torch.cat([left_joints, right_joints], dim=1)  # (B, 44)
     
-    # Calculate violations for left hand
-    left_upper_viol = torch.sum((left_joints > bimanual_hand_model.left_hand.joints_upper) * 
-                               (left_joints - bimanual_hand_model.left_hand.joints_upper), dim=-1)
-    left_lower_viol = torch.sum((left_joints < bimanual_hand_model.left_hand.joints_lower) * 
-                               (bimanual_hand_model.left_hand.joints_lower - left_joints), dim=-1)
+    # Use bimanual joint limits (which combines both hands' limits)
+    upper_violations = torch.sum((all_joints > bimanual_hand_model.joints_upper) * 
+                                (all_joints - bimanual_hand_model.joints_upper), dim=-1)
+    lower_violations = torch.sum((all_joints < bimanual_hand_model.joints_lower) * 
+                                (bimanual_hand_model.joints_lower - all_joints), dim=-1)
     
-    # Calculate violations for right hand  
-    right_upper_viol = torch.sum((right_joints > bimanual_hand_model.right_hand.joints_upper) * 
-                                (right_joints - bimanual_hand_model.right_hand.joints_upper), dim=-1)
-    right_lower_viol = torch.sum((right_joints < bimanual_hand_model.right_hand.joints_lower) * 
-                                (bimanual_hand_model.right_hand.joints_lower - right_joints), dim=-1)
-    
-    return left_upper_viol + left_lower_viol + right_upper_viol + right_lower_viol
+    return upper_violations + lower_violations
 
 
 def cal_hand_object_penetration(bimanual_hand_model, object_model):
@@ -226,12 +235,12 @@ def cal_hand_object_penetration(bimanual_hand_model, object_model):
     
     # Calculate penetration for left hand
     left_distances = bimanual_hand_model.left_hand.cal_distance(object_surface_points)
-    left_distances[left_distances <= 0] = 0
-    left_penetration = left_distances.sum(-1)
+    # Use ReLU instead of direct indexing to maintain gradients
+    left_penetration = torch.sum(torch.relu(-left_distances), dim=-1)
     
     # Calculate penetration for right hand
     right_distances = bimanual_hand_model.right_hand.cal_distance(object_surface_points) 
-    right_distances[right_distances <= 0] = 0
-    right_penetration = right_distances.sum(-1)
+    # Use ReLU instead of direct indexing to maintain gradients
+    right_penetration = torch.sum(torch.relu(-right_distances), dim=-1)
     
     return left_penetration + right_penetration 

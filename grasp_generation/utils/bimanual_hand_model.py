@@ -174,11 +174,10 @@ class BimanualHandModel:
         # Calculate distances from right hand surface points to left hand mesh
         left_distances = self.left_hand.cal_distance(right_surface_points)  # (B, N_right)
         
-        # Calculate penetration (positive when hands overlap)
-        left_to_right_penetration = torch.maximum(torch.tensor(0.0, device=self.device), 
-                                                  threshold - right_distances.abs())
-        right_to_left_penetration = torch.maximum(torch.tensor(0.0, device=self.device),
-                                                  threshold - left_distances.abs())
+        # Calculate penetration using ReLU to maintain gradients
+        # Penetration occurs when distance < threshold
+        left_to_right_penetration = torch.relu(threshold - torch.abs(right_distances))
+        right_to_left_penetration = torch.relu(threshold - torch.abs(left_distances))
         
         # Sum penetrations
         total_penetration = left_to_right_penetration.sum(dim=-1) + right_to_left_penetration.sum(dim=-1)

@@ -103,8 +103,6 @@ class HandModelMJCFLite:
             translation, rotation in rot6d, and joint angles
         """
         self.hand_pose = hand_pose
-        if self.hand_pose.requires_grad:
-            self.hand_pose.retain_grad()
         self.global_translation = self.hand_pose[:, 0:3]
         self.global_rotation = robust_compute_rotation_matrix_from_ortho6d(
             self.hand_pose[:, 3:9])
