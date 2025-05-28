@@ -17,7 +17,9 @@ from tqdm import tqdm
 import math
 import random
 import transforms3d
+import wandb
 
+# from utils.hand_model import HandModel
 from utils.bimanual_hand_model import BimanualHandModel
 from utils.object_model import ObjectModel
 from utils.bimanual_initializations import initialize_bimanual_convex_hull
@@ -103,6 +105,59 @@ def generate(args_list):
 
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    
+    # Initialize wandb for this worker
+    if not args.disable_wandb:
+        wandb.init(
+            project=args.wandb_project,
+            group=f"worker_{id}",
+            name=f"worker_{id}_objects_{len(object_code_list)}",
+            config={
+                # Optimization hyperparameters
+                "worker_id": id,
+                "n_objects": len(object_code_list),
+                "batch_size_each": args.batch_size_each,
+                "n_iter": args.n_iter,
+                "n_contact": args.n_contact,
+                "seed": args.seed,
+                
+                # Annealing parameters
+                "switch_possibility": args.switch_possibility,
+                "starting_temperature": args.starting_temperature,
+                "temperature_decay": args.temperature_decay,
+                "annealing_period": args.annealing_period,
+                "step_size": args.step_size,
+                "stepsize_period": args.stepsize_period,
+                "mu": args.mu,
+                
+                # Energy weights
+                "w_dis": args.w_dis,
+                "w_pen": args.w_pen,
+                "w_spen": args.w_spen,
+                "w_joints": args.w_joints,
+                "w_bimpen": args.w_bimpen,
+                "w_vew": args.w_vew,
+                
+                # Initialization settings
+                "jitter_strength": args.jitter_strength,
+                "distance_lower": args.distance_lower,
+                "distance_upper": args.distance_upper,
+                "theta_lower": args.theta_lower,
+                "theta_upper": args.theta_upper,
+                
+                # Thresholds
+                "thres_fc": args.thres_fc,
+                "thres_dis": args.thres_dis,
+                "thres_pen": args.thres_pen,
+                
+                # Wandb settings
+                "wandb_log_freq": args.wandb_log_freq,
+                
+                # Object list
+                "object_codes": object_code_list
+            },
+            tags=["bimanual", "grasp_generation", f"gpu_{gpu_list[id-1] if id <= len(gpu_list) else 'unknown'}"]
+        )
 
     # prepare models
 
@@ -118,7 +173,7 @@ def generate(args_list):
         mesh_path='mjcf/meshes',
         contact_points_path='mjcf/contact_points.json',
         penetration_points_path='mjcf/penetration_points.json',
-        n_surface_points=100,  # Minimal surface points to reduce memory
+        n_surface_points=100,  # Add: Minimal surface points to reduce memory
         device=device
     )
 
@@ -133,7 +188,7 @@ def generate(args_list):
     initialize_bimanual_convex_hull(bimanual_hand_model, object_model, args)
     
     # Enable gradient tracking BEFORE saving initial pose
-    bimanual_hand_model.bimanual_pose.requires_grad_(True)
+    bimanual_hand_model.bimanual_pose.requires_grad_(True)  # 이건 왜?
     bimanual_pose_st = bimanual_hand_model.bimanual_pose.detach().clone()
 
     optim_config = {
@@ -164,6 +219,21 @@ def generate(args_list):
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
     energy.sum().backward(retain_graph=True)
+    
+    # Log initial energy values
+    if not args.disable_wandb:
+        wandb.log({
+            "initial/total_energy_mean": energy.mean().item(),
+            "initial/total_energy_std": energy.std().item(),
+            "initial/E_fc_mean": E_fc.mean().item(),
+            "initial/E_dis_mean": E_dis.mean().item(),
+            "initial/E_pen_mean": E_pen.mean().item(),
+            "initial/E_spen_mean": E_spen.mean().item(),
+            "initial/E_joints_mean": E_joints.mean().item(),
+            "initial/E_bimpen_mean": E_bimpen.mean().item(),
+            "initial/E_vew_mean": E_vew.mean().item(),
+            "step": 0
+        })
 
     # Optimization loop with progress bar
     for step in tqdm(range(1, args.n_iter + 1), desc=f'Optimizing grasps (Worker {id})'):
@@ -186,7 +256,59 @@ def generate(args_list):
             E_joints[accept] = new_E_joints[accept]
             E_bimpen[accept] = new_E_bimpen[accept]
             E_vew[accept] = new_E_vew[accept]
-
+            
+            # Log energy values and optimization metrics every few steps
+            if not args.disable_wandb and (step % args.wandb_log_freq == 0 or step == 1):
+                accept_rate = accept.float().mean().item()
+                
+                # Log current energy statistics
+                log_dict = {
+                    "step": step,
+                    "optimization/temperature": t,
+                    "optimization/accept_rate": accept_rate,
+                    "optimization/step_norm": torch.norm(s, dim=1).mean().item(),
+                    
+                    # Current energy means and stds
+                    "energy/total_mean": energy.mean().item(),
+                    "energy/total_std": energy.std().item(),
+                    "energy/total_min": energy.min().item(),
+                    "energy/total_max": energy.max().item(),
+                    
+                    "energy/E_fc_mean": E_fc.mean().item(),
+                    "energy/E_fc_std": E_fc.std().item(),
+                    
+                    "energy/E_dis_mean": E_dis.mean().item(),
+                    "energy/E_dis_std": E_dis.std().item(),
+                    
+                    "energy/E_pen_mean": E_pen.mean().item(),
+                    "energy/E_pen_std": E_pen.std().item(),
+                    
+                    "energy/E_spen_mean": E_spen.mean().item(),
+                    "energy/E_spen_std": E_spen.std().item(),
+                    
+                    "energy/E_joints_mean": E_joints.mean().item(),
+                    "energy/E_joints_std": E_joints.std().item(),
+                    
+                    "energy/E_bimpen_mean": E_bimpen.mean().item(),
+                    "energy/E_bimpen_std": E_bimpen.std().item(),
+                    
+                    "energy/E_vew_mean": E_vew.mean().item(),
+                    "energy/E_vew_std": E_vew.std().item(),
+                }
+                
+                # Add percentage of successful grasps (below thresholds)
+                good_fc = (E_fc < args.thres_fc).float().mean().item()
+                good_dis = (E_dis < args.thres_dis).float().mean().item()
+                good_pen = (E_pen < args.thres_pen).float().mean().item()
+                
+                log_dict.update({
+                    "success_rate/good_fc_pct": good_fc * 100,
+                    "success_rate/good_dis_pct": good_dis * 100,
+                    "success_rate/good_pen_pct": good_pen * 100,
+                    "success_rate/overall_good_pct": (good_fc * good_dis * good_pen) * 100
+                })
+                
+                wandb.log(log_dict)
 
     # save results
     translation_names = ['WRJTx', 'WRJTy', 'WRJTz']
@@ -272,21 +394,45 @@ def generate(args_list):
             ))
         np.save(os.path.join(args.result_path, 'bimanual_' + object_code + '.npy'), data_list, allow_pickle=True)
 
+    # Log final results summary
+    if not args.disable_wandb:
+        wandb.log({
+            "final/total_energy_mean": energy.mean().item(),
+            "final/total_energy_std": energy.std().item(),
+            "final/total_energy_min": energy.min().item(),
+            "final/total_energy_max": energy.max().item(),
+            "final/E_fc_mean": E_fc.mean().item(),
+            "final/E_dis_mean": E_dis.mean().item(),
+            "final/E_pen_mean": E_pen.mean().item(),
+            "final/E_spen_mean": E_spen.mean().item(),
+            "final/E_joints_mean": E_joints.mean().item(),
+            "final/E_bimpen_mean": E_bimpen.mean().item(),
+            "final/E_vew_mean": E_vew.mean().item(),
+            "final/good_fc_pct": (E_fc < args.thres_fc).float().mean().item() * 100,
+            "final/good_dis_pct": (E_dis < args.thres_dis).float().mean().item() * 100,
+            "final/good_pen_pct": (E_pen < args.thres_pen).float().mean().item() * 100,
+            "final/overall_success_pct": ((E_fc < args.thres_fc) & (E_dis < args.thres_dis) & (E_pen < args.thres_pen)).float().mean().item() * 100,
+            "step": args.n_iter
+        })
+        
+        # Close wandb run
+        wandb.finish()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # experiment settings
     parser.add_argument('--result_path', default="../data/bimanual_graspdata", type=str)
-    parser.add_argument('--data_root_path', default="../data/meshdata", type=str)
+    parser.add_argument('--data_root_path', default="../data/meshdata_one", type=str)
     parser.add_argument('--object_code_list', nargs='*', type=str)
     parser.add_argument('--all', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
     parser.add_argument('--todo', action='store_true')
     parser.add_argument('--seed', default=1, type=int)
     parser.add_argument('--n_contact', default=8, type=int)  # Changed from 4 to 8 for bimanual
-    parser.add_argument('--batch_size_each', default=5, type=int)  # Extremely reduced for bimanual memory usage
-    parser.add_argument('--max_total_batch_size', default=10, type=int)  # Extremely reduced for bimanual
-    parser.add_argument('--n_iter', default=100, type=int)  # Reduced for testing bimanual
+    parser.add_argument('--batch_size_each', default=500, type=int)  # Extremely reduced for bimanual memory usage
+    parser.add_argument('--max_total_batch_size', default=1000, type=int)  # Extremely reduced for bimanual
+    parser.add_argument('--n_iter', default=6000, type=int)  # Reduced for testing bimanual
     # hyper parameters
     parser.add_argument('--switch_possibility', default=0.5, type=float)
     parser.add_argument('--mu', default=0.98, type=float)
@@ -312,6 +458,10 @@ if __name__ == '__main__':
     parser.add_argument('--thres_fc', default=0.5, type=float)      # Relaxed for bimanual
     parser.add_argument('--thres_dis', default=0.008, type=float)   # Relaxed for bimanual
     parser.add_argument('--thres_pen', default=0.002, type=float)   # Relaxed for bimanual
+    # wandb settings
+    parser.add_argument('--wandb_project', default='bimanual-grasp-generation', type=str)
+    parser.add_argument('--wandb_log_freq', default=50, type=int, help='Log frequency for wandb (every N steps)')
+    parser.add_argument('--disable_wandb', action='store_true', help='Disable wandb logging')
 
     args = parser.parse_args()
 
