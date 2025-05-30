@@ -20,6 +20,7 @@ import transforms3d
 import wandb
 import time
 import logging
+import json
 
 # from utils.hand_model import HandModel
 from utils.bimanual_hand_model import BimanualHandModel
@@ -38,6 +39,17 @@ except RuntimeError:
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 np.seterr(all='raise')
+
+
+def load_config(config_path='config.json'):
+    """Load configuration from JSON file"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file {config_path} not found")
+    
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    return config
 
 
 class BimanualAnnealing:
@@ -726,7 +738,6 @@ if __name__ == '__main__':
     parser.add_argument('--n_contact', default=8, type=int)  # Changed from 4 to 8 for bimanual
     parser.add_argument('--batch_size_each', default=500, type=int)  # Extremely reduced for bimanual memory usage
     parser.add_argument('--max_total_batch_size', default=1000, type=int)  # Extremely reduced for bimanual
-    parser.add_argument('--n_iter', default=1, type=int)  # Reduced for testing bimanual
     # hyper parameters
     parser.add_argument('--switch_possibility', default=0.5, type=float)
     parser.add_argument('--mu', default=0.1, type=float)  # Reduced from 0.98 for stability with gradient clipping
@@ -736,12 +747,6 @@ if __name__ == '__main__':
     parser.add_argument('--annealing_period', default=40, type=int)
     parser.add_argument('--temperature_decay', default=0.95, type=float)
     # Energy weights
-    parser.add_argument('--w_dis', default=100.0, type=float)
-    parser.add_argument('--w_pen', default=100.0, type=float)
-    parser.add_argument('--w_spen', default=10.0, type=float)
-    parser.add_argument('--w_joints', default=1.0, type=float)
-    parser.add_argument('--w_bimpen', default=50.0, type=float)  # NEW: Inter-hand penetration weight
-    parser.add_argument('--w_vew', default=1.0, type=float)     # NEW: Wrench ellipse volume weight
     # initialization settings
     parser.add_argument('--jitter_strength', default=0.1, type=float)
     parser.add_argument('--distance_lower', default=0.25, type=float)  # Increased for bimanual
@@ -758,6 +763,30 @@ if __name__ == '__main__':
     parser.add_argument('--disable_wandb', action='store_true', help='Disable wandb logging')
 
     args = parser.parse_args()
+
+    # Load configuration from JSON file
+    try:
+        config = load_config()
+        # Add config values to args
+        args.n_iter = config.get('n_iter', 1000)  # Default to 1000 if not in config
+        args.w_dis = config.get('w_dis', 100.0)
+        args.w_pen = config.get('w_pen', 100.0)
+        args.w_spen = config.get('w_spen', 10.0)
+        args.w_joints = config.get('w_joints', 1.0)
+        args.w_bimpen = config.get('w_bimpen', 50.0)
+        args.w_vew = config.get('w_vew', 1.0)
+        print(f'Loaded config: n_iter = {args.n_iter}')
+        print(f'Loaded config: w_dis = {args.w_dis}, w_pen = {args.w_pen}, w_spen = {args.w_spen}')
+        print(f'Loaded config: w_joints = {args.w_joints}, w_bimpen = {args.w_bimpen}, w_vew = {args.w_vew}')
+    except FileNotFoundError:
+        print("Warning: config.json not found, using default values")
+        args.n_iter = 1000  # Default value
+        args.w_dis = 100.0
+        args.w_pen = 100.0
+        args.w_spen = 10.0
+        args.w_joints = 1.0
+        args.w_bimpen = 50.0
+        args.w_vew = 1.0
 
     gpu_list = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     print(f'gpu_list: {gpu_list}')

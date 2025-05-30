@@ -1,0 +1,11 @@
+{
+    "n_iter": 1000,
+    "w_dis": 100.0,
+    "w_pen": 100.0,
+    "w_spen": 10.0,
+    "w_joints": 1.0,
+    "w_bimpen": 50.0,
+    "w_vew": 1.0,
+    "_description": "Configuration file for bimanual grasp generation",
+    "_note": "Add more configuration parameters here as needed"
+} 

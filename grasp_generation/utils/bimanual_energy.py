@@ -9,7 +9,7 @@ import numpy as np
 
 
 def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=100.0, w_spen=10.0, 
-                       w_joints=10.0, w_bimpen=50.0, w_vew=1.0, verbose=False):
+                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, verbose=False):
     """
     Calculate bimanual energy function based on BimanGrasp paper
     
@@ -46,9 +46,10 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
 
 
     # E_dis: Hand-object distance (sum of both hands)
-
+    # ----------CLEAR----------
     distance, contact_normal = object_model.cal_distance(bimanual_hand_model.contact_points)  # (B, 8), (B, 8, 3)
     E_dis = torch.sum(distance.abs(), dim=-1, dtype=torch.float).to(device)  # (B,)
+    
     # # 1. 왼손에 대한 거리 및 에너지 계산
     # left_distance, left_contact_normal = object_model.cal_distance(bimanual_hand_model.left_hand.contact_points)
     # E_dis_left = torch.sum(left_distance.abs(), dim=-1, dtype=torch.float)
@@ -199,7 +200,7 @@ def cal_wrench_ellipse_volume(bimanual_hand_model, contact_normal, device):
     
     return E_vew
 
-
+# ------------------CLEAR-------------------
 def cal_joint_violations(bimanual_hand_model):
     """
     Calculate joint limit violations for both hands
@@ -254,14 +255,16 @@ def cal_hand_object_penetration(bimanual_hand_model, object_model):
     left_distances = bimanual_hand_model.left_hand.cal_distance(object_surface_points)
     # Use ReLU instead of direct indexing to maintain gradients
     # left_penetration = torch.sum(torch.relu(-left_distances), dim=-1)
-    left_penetration = torch.where(left_distances > 0, left_distances, torch.zeros_like(left_distances))
+    # left_penetration = torch.where(left_distances > 0, left_distances, torch.zeros_like(left_distances))
+    left_distances[left_distances <= 0] = 0
     
     
     # Calculate penetration for right hand
     right_distances = bimanual_hand_model.right_hand.cal_distance(object_surface_points) 
     # Use ReLU instead of direct indexing to maintain gradients
     # right_penetration = torch.sum(torch.relu(-right_distances), dim=-1)
-    right_penetration = torch.where(right_distances > 0, right_distances, torch.zeros_like(right_distances))
+    # right_penetration = torch.where(right_distances > 0, right_distances, torch.zeros_like(right_distances))
+    right_distances[right_distances <= 0] = 0
 
     
-    return left_penetration.sum(dim=1) + right_penetration.sum(dim=1)
+    return left_distances.sum(-1) + right_distances.sum(-1)

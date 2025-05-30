@@ -144,7 +144,7 @@ class BimanualHandModel:
         right_distances = self.right_hand.cal_distance(x)
         
         # Return minimum distance to either hand
-        return torch.maximum(left_distances, right_distances)
+        return torch.minimum(left_distances, right_distances)
     
     def inter_hand_penetration(self, threshold=0.002):
         """
