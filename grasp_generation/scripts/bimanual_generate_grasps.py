@@ -52,7 +52,7 @@ class BimanualAnnealing:
         
     def try_step(self):
         # Save current pose for potential rollback (keep gradient)
-        self.prev_pose = self.bimanual_hand_model.bimanual_pose.clone()
+        self.prev_pose = self.bimanual_hand_model.bimanual_pose.detach().clone()
         
         # Generate random step for bimanual pose
         batch_size = self.bimanual_hand_model.bimanual_pose.shape[0]
@@ -116,7 +116,12 @@ class BimanualAnnealing:
 
 def setup_logging(worker_id):
     """Setup logging to file"""
-    log_filename = f"bimanual_optimization_worker_{worker_id}.log"
+    # Create log directory if it doesn't exist
+    log_dir = "log"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    log_filename = os.path.join(log_dir, f"bimanual_optimization_worker_{worker_id}.log")
     
     # Remove existing log file
     if os.path.exists(log_filename):
@@ -143,6 +148,39 @@ def setup_logging(worker_id):
     return logger
 
 
+def setup_wandb_logging(worker_id):
+    """Setup separate wandb logging to file"""
+    log_dir = "log"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    wandb_log_filename = os.path.join(log_dir, f"bimanual_wandb_log_worker_{worker_id}.log")
+    
+    # Remove existing wandb log file
+    if os.path.exists(wandb_log_filename):
+        os.remove(wandb_log_filename)
+    
+    # Setup wandb logger
+    wandb_logger = logging.getLogger(f'wandb_worker_{worker_id}')
+    wandb_logger.setLevel(logging.INFO)
+    
+    # Clear existing handlers
+    for handler in wandb_logger.handlers[:]:
+        wandb_logger.removeHandler(handler)
+    
+    # File handler for wandb logs
+    wandb_file_handler = logging.FileHandler(wandb_log_filename, mode='w')
+    wandb_file_handler.setLevel(logging.INFO)
+    
+    # Simple formatter for wandb data
+    wandb_formatter = logging.Formatter('%(asctime)s - %(message)s')
+    wandb_file_handler.setFormatter(wandb_formatter)
+    
+    wandb_logger.addHandler(wandb_file_handler)
+    
+    return wandb_logger
+
+
 def generate(args_list):
     args, object_code_list, id, gpu_list = args_list
 
@@ -151,6 +189,8 @@ def generate(args_list):
     
     # Setup logging
     logger = setup_logging(id)
+    wandb_logger = setup_wandb_logging(id)  # NEW: Setup separate wandb logging
+    
     logger.info(f"Starting bimanual grasp generation for worker {id}")
     logger.info(f"Objects: {object_code_list}")
     logger.info(f"Configuration: batch_size_each={args.batch_size_each}, n_iter={args.n_iter}")
@@ -222,10 +262,10 @@ def generate(args_list):
 
     # Create bimanual hand model with minimal surface points for memory efficiency
     bimanual_hand_model = BimanualHandModel(
-        mjcf_path='mjcf/shadow_hand_wrist_free.xml',
-        mesh_path='mjcf/meshes',
-        contact_points_path='mjcf/contact_points.json',
-        penetration_points_path='mjcf/penetration_points.json',
+        model_path='models',
+        mesh_path='models/meshes',
+        contact_points_path='models',
+        penetration_points_path='models/penetration_points.json',
         n_surface_points=100,  # Add: Minimal surface points to reduce memory
         device=device
     )
@@ -294,7 +334,8 @@ def generate(args_list):
 
     # Ensure gradient calculation is working by computing scalar loss
     total_loss = energy.sum()
-    total_loss.backward(retain_graph=True)
+    # total_loss.backward(retain_graph=True)
+    total_loss.backward(retain_graph=False)
     
     # Check initial gradient
     initial_grad_norm = 0.0
@@ -325,7 +366,7 @@ def generate(args_list):
     
     # Log initial energy values after gradient check
     if not args.disable_wandb:
-        wandb.log({
+        initial_wandb_data = {
             "initial/total_energy_mean": energy.mean().item(),
             "initial/total_energy_std": energy.std().item(),
             "initial/E_fc_mean": E_fc.mean().item(),
@@ -337,7 +378,11 @@ def generate(args_list):
             "initial/E_vew_mean": E_vew.mean().item(),
             "initial/gradient_norm": initial_grad_norm,
             "step": 0
-        })
+        }
+        wandb.log(initial_wandb_data)
+        
+        # Also log to separate wandb file
+        wandb_logger.info(f"INITIAL: {initial_wandb_data}")
 
     # Optimization loop with progress bar
     for step in tqdm(range(1, args.n_iter + 1), desc=f'Optimizing grasps (Worker {id})'):
@@ -355,7 +400,8 @@ def generate(args_list):
         new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew = cal_bimanual_energy(
             bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
-        new_energy.sum().backward(retain_graph=True)
+        # new_energy.sum().backward(retain_graph=True)
+        new_energy.sum().backward(retain_graph=False)
 
         # Accept step without disabling gradients
         accept, t = optimizer.accept_step(energy, new_energy)
@@ -512,6 +558,9 @@ def generate(args_list):
                 })
                 
                 wandb.log(log_dict)
+                
+                # Also log to separate wandb file
+                wandb_logger.info(f"STEP_{step}: {log_dict}")
 
     # Final logging
     logger.info(f"Optimization completed for worker {id}")
@@ -606,7 +655,7 @@ def generate(args_list):
 
     # Log final results summary
     if not args.disable_wandb:
-        wandb.log({
+        final_wandb_data = {
             "final/total_energy_mean": energy.mean().item(),
             "final/total_energy_std": energy.std().item(),
             "final/total_energy_min": energy.min().item(),
@@ -623,7 +672,11 @@ def generate(args_list):
             "final/good_pen_pct": (E_pen < args.thres_pen).float().mean().item() * 100,
             "final/overall_success_pct": ((E_fc < args.thres_fc) & (E_dis < args.thres_dis) & (E_pen < args.thres_pen)).float().mean().item() * 100,
             "step": args.n_iter
-        })
+        }
+        wandb.log(final_wandb_data)
+        
+        # Also log to separate wandb file
+        wandb_logger.info(f"FINAL: {final_wandb_data}")
         
         # Close wandb run
         wandb.finish()
@@ -644,7 +697,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_contact', default=8, type=int)  # Changed from 4 to 8 for bimanual
     parser.add_argument('--batch_size_each', default=500, type=int)  # Extremely reduced for bimanual memory usage
     parser.add_argument('--max_total_batch_size', default=1000, type=int)  # Extremely reduced for bimanual
-    parser.add_argument('--n_iter', default=6000, type=int)  # Reduced for testing bimanual
+    parser.add_argument('--n_iter', default=100, type=int)  # Reduced for testing bimanual
     # hyper parameters
     parser.add_argument('--switch_possibility', default=0.5, type=float)
     parser.add_argument('--mu', default=0.1, type=float)  # Reduced from 0.98 for stability with gradient clipping

@@ -94,10 +94,10 @@ if __name__ == '__main__':
 
     # Create bimanual hand model
     bimanual_hand_model = BimanualHandModel(
-        mjcf_path='mjcf/shadow_hand_wrist_free.xml',
-        mesh_path='mjcf/meshes',
-        contact_points_path='mjcf/contact_points.json',
-        penetration_points_path='mjcf/penetration_points.json',
+        model_path='models',
+        mesh_path='models/meshes',
+        contact_points_path='models',
+        penetration_points_path='models/penetration_points.json',
         device=device
     )
 

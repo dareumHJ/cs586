@@ -9,7 +9,7 @@ import numpy as np
 
 
 def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=100.0, w_spen=10.0, 
-                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, verbose=False):
+                       w_joints=10.0, w_bimpen=50.0, w_vew=1.0, verbose=False):
     """
     Calculate bimanual energy function based on BimanGrasp paper
     
@@ -40,16 +40,33 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
         total energy (if verbose=False) or tuple of energy terms (if verbose=True)
     """
     
-    # E_dis: Hand-object distance (sum of both hands)
+
     batch_size, n_contact, _ = bimanual_hand_model.contact_points.shape  # (B, 8, 3)
     device = object_model.device
+
+
+    # E_dis: Hand-object distance (sum of both hands)
+
     distance, contact_normal = object_model.cal_distance(bimanual_hand_model.contact_points)  # (B, 8), (B, 8, 3)
     E_dis = torch.sum(distance.abs(), dim=-1, dtype=torch.float).to(device)  # (B,)
+    # # 1. 왼손에 대한 거리 및 에너지 계산
+    # left_distance, left_contact_normal = object_model.cal_distance(bimanual_hand_model.left_hand.contact_points)
+    # E_dis_left = torch.sum(left_distance.abs(), dim=-1, dtype=torch.float)
+
+    # # 2. 오른손에 대한 거리 및 에너지 계산
+    # right_distance, right_contact_normal = object_model.cal_distance(bimanual_hand_model.right_hand.contact_points)
+    # E_dis_right = torch.sum(right_distance.abs(), dim=-1, dtype=torch.float)
+
+    # # 3. 두 에너지를 합산하여 최종 E_dis 생성
+    # E_dis = E_dis_left + E_dis_right
+    # E_dis = E_dis.to(device)
 
     # E_fc: Bimanual Force Closure (8 contact points)
+    # ----------CLEAR----------
     E_fc = cal_bimanual_force_closure(bimanual_hand_model, contact_normal, device)
 
-    # E_vew: Wrench Ellipse Volume  
+    # E_vew: Wrench Ellipse Volume  (NEW)
+    # ----------CLEAR----------
     E_vew = cal_wrench_ellipse_volume(bimanual_hand_model, contact_normal, device)
     
     # E_joints: Joint limit violations for both hands
@@ -236,11 +253,15 @@ def cal_hand_object_penetration(bimanual_hand_model, object_model):
     # Calculate penetration for left hand
     left_distances = bimanual_hand_model.left_hand.cal_distance(object_surface_points)
     # Use ReLU instead of direct indexing to maintain gradients
-    left_penetration = torch.sum(torch.relu(-left_distances), dim=-1)
+    # left_penetration = torch.sum(torch.relu(-left_distances), dim=-1)
+    left_penetration = torch.where(left_distances > 0, left_distances, torch.zeros_like(left_distances))
+    
     
     # Calculate penetration for right hand
     right_distances = bimanual_hand_model.right_hand.cal_distance(object_surface_points) 
     # Use ReLU instead of direct indexing to maintain gradients
-    right_penetration = torch.sum(torch.relu(-right_distances), dim=-1)
+    # right_penetration = torch.sum(torch.relu(-right_distances), dim=-1)
+    right_penetration = torch.where(right_distances > 0, right_distances, torch.zeros_like(right_distances))
+
     
-    return left_penetration + right_penetration 
+    return left_penetration.sum(dim=1) + right_penetration.sum(dim=1)

@@ -13,3 +13,9 @@ data/
 
 **.html
 *.log
+*.obj
+*.png
+.xml
+log.txt
+
+models/

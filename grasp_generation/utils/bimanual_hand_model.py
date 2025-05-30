@@ -14,7 +14,7 @@ class BimanualHandModel:
     # Shadow Hand pose size: 3 (trans) + 6 (rot6d) + 22 (joints) = 31
     HAND_POSE_SIZE = 31
     
-    def __init__(self, mjcf_path, mesh_path, contact_points_path, penetration_points_path, n_surface_points=0, device='cpu'):
+    def __init__(self, model_path, mesh_path, contact_points_path, penetration_points_path, n_surface_points=0, device='cpu'):
         """
         Create a Bimanual Hand Model using two HandModel instances
         
@@ -41,18 +41,18 @@ class BimanualHandModel:
         reduced_surface_points = max(1, n_surface_points // 4)  # Reduce by 75%
         
         self.left_hand = HandModel(
-            mjcf_path=mjcf_path,
+            mjcf_path=model_path+'/left_shadow_hand_wrist_free.xml',
             mesh_path=mesh_path, 
-            contact_points_path=contact_points_path,
+            contact_points_path=contact_points_path+'/left_hand_contact_points.json',
             penetration_points_path=penetration_points_path,
             n_surface_points=reduced_surface_points,
             device=device
         )
         
         self.right_hand = HandModel(
-            mjcf_path=mjcf_path,
+            mjcf_path=model_path+'/right_shadow_hand_wrist_free.xml',
             mesh_path=mesh_path,
-            contact_points_path=contact_points_path, 
+            contact_points_path=contact_points_path+'/right_hand_contact_points.json', 
             penetration_points_path=penetration_points_path,
             n_surface_points=reduced_surface_points,
             device=device
@@ -141,7 +141,7 @@ class BimanualHandModel:
         right_distances = self.right_hand.cal_distance(x)
         
         # Return minimum distance to either hand
-        return torch.minimum(left_distances, right_distances)
+        return torch.maximum(left_distances, right_distances)
     
     def inter_hand_penetration(self, threshold=0.002):
         """
