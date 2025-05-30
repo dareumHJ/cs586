@@ -159,6 +159,10 @@ def calculate_hand_orientation(hand_pos, other_hand_pos, object_center, device, 
     palm_direction = object_center - hand_pos
     palm_direction = palm_direction / torch.norm(palm_direction)
     
+    # 오른손의 경우 손바닥 방향을 왼손과 같은 방향으로 설정
+    if hand_side == 'right':
+        palm_direction = -palm_direction
+    
     # 2. 손가락 방향을 견고하게 계산하는 방법 (개선된 로직)
     toward_other = other_hand_pos - hand_pos
     toward_other = toward_other / torch.norm(toward_other)
@@ -179,9 +183,9 @@ def calculate_hand_orientation(hand_pos, other_hand_pos, object_center, device, 
     
     # 3. 엄지 방향 계산: 손바닥과 손가락 방향 모두에 수직
     if hand_side == 'right':
-        thumb_direction = -torch.cross(palm_direction, finger_direction)
+        thumb_direction = torch.cross(finger_direction, palm_direction)  # 순서 바꿈 (finger × palm)
     else:  # left hand
-        thumb_direction = torch.cross(palm_direction, finger_direction)
+        thumb_direction = torch.cross(palm_direction, finger_direction)  # 기존 (palm × finger)
     
     thumb_direction = thumb_direction / torch.norm(thumb_direction)
     
@@ -190,36 +194,13 @@ def calculate_hand_orientation(hand_pos, other_hand_pos, object_center, device, 
     y_axis = palm_direction     # 손바닥 방향 (물체 향함)
     z_axis = finger_direction   # 손가락 방향
     
-    print(f"[{hand_side}] BEFORE matrix creation:")
-    print(f"  x_axis (thumb): {x_axis}")
-    print(f"  y_axis (palm): {y_axis}")  
-    print(f"  z_axis (finger): {z_axis}")
-    
     # Rotation matrix 생성 - 축들을 열(column)으로 배치
-    stacked = torch.stack([x_axis, y_axis, z_axis], dim=0)
-    print(f"[{hand_side}] stacked shape: {stacked.shape}")
-    print(f"[{hand_side}] stacked:\n{stacked}")
+    rotation_matrix = torch.stack([x_axis, y_axis, z_axis], dim=0).T.unsqueeze(0)  # (1, 3, 3)
     
-    rotation_matrix_2d = stacked.T
-    print(f"[{hand_side}] after transpose:\n{rotation_matrix_2d}")
-    
-    rotation_matrix = rotation_matrix_2d.unsqueeze(0)  # (1, 3, 3)
-    print(f"[{hand_side}] final rotation_matrix shape: {rotation_matrix.shape}")
-    print(f"[{hand_side}] final rotation_matrix:\n{rotation_matrix[0]}")
-    
-    # matrix_to_rot6d 계산 단계별 확인
+    # 6D representation 생성
     first_two_cols = rotation_matrix[:, :, :2]
-    print(f"[{hand_side}] first_two_cols shape: {first_two_cols.shape}")
-    print(f"[{hand_side}] first_two_cols:\n{first_two_cols[0]}")
-    
-    # transpose로 열 순서로 펼쳐지도록 수정
     first_two_cols_transposed = first_two_cols.transpose(-1, -2)  # (B, 2, 3)
-    print(f"[{hand_side}] after transpose: shape {first_two_cols_transposed.shape}")
-    print(f"[{hand_side}] after transpose:\n{first_two_cols_transposed[0]}")
-    
-    # matrix_to_rot6d로 올바른 6D representation 생성
     rot6d = first_two_cols_transposed.reshape(-1, 6).squeeze(0)  # (6,)
-    print(f"[{hand_side}] final rot6d: {rot6d}")
     
     # 최종 결과: [위치(3) + 회전(6)] = 9차원 벡터
     return torch.cat([hand_pos, rot6d])

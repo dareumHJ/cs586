@@ -46,13 +46,9 @@ def robust_compute_rotation_matrix_from_ortho6d(poses, hand_side=None):
     x = normalize_vector(middle + orthmid)
     y = normalize_vector(middle - orthmid)
     
-    # 왼손과 오른손에 따라 서로 다른 cross product 계산
-    if hand_side == 'right':
-        # 오른손: z = y × x (부호 반전)로 거울상 관계 구성
-        z = normalize_vector(cross_product(y, x))
-    else:
-        # 왼손: z = x × y (기본)
-        z = normalize_vector(cross_product(x, y))
+    # 모든 손에 대해 동일한 방식으로 z축 계산
+    # 실제 좌우 구분은 메시 자체에서 결정됨
+    z = normalize_vector(cross_product(x, y))
 
     x = x.view(-1, 3, 1)
     y = y.view(-1, 3, 1)
