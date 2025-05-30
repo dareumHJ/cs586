@@ -23,11 +23,18 @@ def compute_rotation_matrix_from_ortho6d(poses):
     matrix = torch.cat((x, y, z), 2)  # batch*3*3
     return matrix
 
-def robust_compute_rotation_matrix_from_ortho6d(poses):
+def robust_compute_rotation_matrix_from_ortho6d(poses, hand_side=None):
     """
     Instead of making 2nd vector orthogonal to first
     create a base that takes into account the two predicted
     directions equally
+    
+    Parameters
+    ----------
+    poses: (B, 6) torch.FloatTensor
+        6D rotation representation [x_raw(3), y_raw(3)]
+    hand_side: str or None
+        'left', 'right', or None for backward compatibility
     """
     x_raw = poses[:, 0:3]  # batch*3
     y_raw = poses[:, 3:6]  # batch*3
@@ -38,16 +45,20 @@ def robust_compute_rotation_matrix_from_ortho6d(poses):
     orthmid = normalize_vector(x - y)
     x = normalize_vector(middle + orthmid)
     y = normalize_vector(middle - orthmid)
-    # Their scalar product should be small !
-    # assert torch.einsum("ij,ij->i", [x, y]).abs().max() < 0.00001
-    z = normalize_vector(cross_product(x, y))
+    
+    # 왼손과 오른손에 따라 서로 다른 cross product 계산
+    if hand_side == 'right':
+        # 오른손: z = y × x (부호 반전)로 거울상 관계 구성
+        z = normalize_vector(cross_product(y, x))
+    else:
+        # 왼손: z = x × y (기본)
+        z = normalize_vector(cross_product(x, y))
 
     x = x.view(-1, 3, 1)
     y = y.view(-1, 3, 1)
     z = z.view(-1, 3, 1)
     matrix = torch.cat((x, y, z), 2)  # batch*3*3
-    # Check for reflection in matrix ! If found, flip last vector TODO
-    # assert (torch.stack([torch.det(mat) for mat in matrix ])< 0).sum() == 0
+    
     return matrix
 
 

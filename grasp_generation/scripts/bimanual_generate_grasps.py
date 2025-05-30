@@ -280,6 +280,35 @@ def generate(args_list):
 
     initialize_bimanual_convex_hull(bimanual_hand_model, object_model, args)
     
+    # Print initial location and rotation information
+    print(f"\n=== Initial Bimanual Hand Poses ===")
+    print(f"Total batch size: {bimanual_hand_model.bimanual_pose.shape[0]}")
+    
+    # Show first sample as example
+    sample_pose = bimanual_hand_model.bimanual_pose[0]
+    left_translation = sample_pose[:3]
+    left_rotation = sample_pose[3:9]
+    right_translation = sample_pose[31:34]
+    right_rotation = sample_pose[34:40]
+    
+    print(f"\nSample [0] - Left Hand:")
+    print(f"  Translation: [{left_translation[0]:.4f}, {left_translation[1]:.4f}, {left_translation[2]:.4f}]")
+    print(f"  Rotation6D: [{left_rotation[0]:.4f}, {left_rotation[1]:.4f}, {left_rotation[2]:.4f}, {left_rotation[3]:.4f}, {left_rotation[4]:.4f}, {left_rotation[5]:.4f}]")
+    
+    print(f"\nSample [0] - Right Hand:")
+    print(f"  Translation: [{right_translation[0]:.4f}, {right_translation[1]:.4f}, {right_translation[2]:.4f}]")
+    print(f"  Rotation6D: [{right_rotation[0]:.4f}, {right_rotation[1]:.4f}, {right_rotation[2]:.4f}, {right_rotation[3]:.4f}, {right_rotation[4]:.4f}, {right_rotation[5]:.4f}]")
+    
+    # Show statistics for all samples
+    all_left_trans = bimanual_hand_model.bimanual_pose[:, :3]
+    all_right_trans = bimanual_hand_model.bimanual_pose[:, 31:34]
+    
+    print(f"\nAll Samples Statistics:")
+    print(f"  Left Hand Translation - Mean: [{all_left_trans.mean(0)[0]:.4f}, {all_left_trans.mean(0)[1]:.4f}, {all_left_trans.mean(0)[2]:.4f}]")
+    print(f"  Right Hand Translation - Mean: [{all_right_trans.mean(0)[0]:.4f}, {all_right_trans.mean(0)[1]:.4f}, {all_right_trans.mean(0)[2]:.4f}]")
+    print(f"  Distance between hands: {torch.norm(all_left_trans - all_right_trans, dim=1).mean():.4f} ± {torch.norm(all_left_trans - all_right_trans, dim=1).std():.4f}")
+    print("===================================\n")
+    
     # Enable gradient tracking BEFORE saving initial pose
     bimanual_hand_model.bimanual_pose.requires_grad_(True)  # 이건 왜?
     bimanual_pose_st = bimanual_hand_model.bimanual_pose.detach().clone()
@@ -602,14 +631,14 @@ def generate(args_list):
             
             # Process left hand pose
             left_qpos = dict(zip(left_joint_names, left_pose[9:].tolist()))
-            left_rot = robust_compute_rotation_matrix_from_ortho6d(left_pose[3:9].unsqueeze(0))[0]
+            left_rot = robust_compute_rotation_matrix_from_ortho6d(left_pose[3:9].unsqueeze(0), hand_side='left')[0]
             left_euler = transforms3d.euler.mat2euler(left_rot, axes='sxyz')
             left_qpos.update(dict(zip(left_rot_names, left_euler)))
             left_qpos.update(dict(zip(left_translation_names, left_pose[:3].tolist())))
             
             # Process right hand pose
             right_qpos = dict(zip(right_joint_names, right_pose[9:].tolist()))
-            right_rot = robust_compute_rotation_matrix_from_ortho6d(right_pose[3:9].unsqueeze(0))[0]
+            right_rot = robust_compute_rotation_matrix_from_ortho6d(right_pose[3:9].unsqueeze(0), hand_side='right')[0]
             right_euler = transforms3d.euler.mat2euler(right_rot, axes='sxyz')
             right_qpos.update(dict(zip(right_rot_names, right_euler)))
             right_qpos.update(dict(zip(right_translation_names, right_pose[:3].tolist())))
@@ -623,13 +652,13 @@ def generate(args_list):
             right_pose_st = initial_bimanual_pose[31:]
             
             left_qpos_st = dict(zip(left_joint_names, left_pose_st[9:].tolist()))
-            left_rot_st = robust_compute_rotation_matrix_from_ortho6d(left_pose_st[3:9].unsqueeze(0))[0]
+            left_rot_st = robust_compute_rotation_matrix_from_ortho6d(left_pose_st[3:9].unsqueeze(0), hand_side='left')[0]
             left_euler_st = transforms3d.euler.mat2euler(left_rot_st, axes='sxyz')
             left_qpos_st.update(dict(zip(left_rot_names, left_euler_st)))
             left_qpos_st.update(dict(zip(left_translation_names, left_pose_st[:3].tolist())))
             
             right_qpos_st = dict(zip(right_joint_names, right_pose_st[9:].tolist()))
-            right_rot_st = robust_compute_rotation_matrix_from_ortho6d(right_pose_st[3:9].unsqueeze(0))[0]
+            right_rot_st = robust_compute_rotation_matrix_from_ortho6d(right_pose_st[3:9].unsqueeze(0), hand_side='right')[0]
             right_euler_st = transforms3d.euler.mat2euler(right_rot_st, axes='sxyz')
             right_qpos_st.update(dict(zip(right_rot_names, right_euler_st)))
             right_qpos_st.update(dict(zip(right_translation_names, right_pose_st[:3].tolist())))
@@ -697,7 +726,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_contact', default=8, type=int)  # Changed from 4 to 8 for bimanual
     parser.add_argument('--batch_size_each', default=500, type=int)  # Extremely reduced for bimanual memory usage
     parser.add_argument('--max_total_batch_size', default=1000, type=int)  # Extremely reduced for bimanual
-    parser.add_argument('--n_iter', default=100, type=int)  # Reduced for testing bimanual
+    parser.add_argument('--n_iter', default=1, type=int)  # Reduced for testing bimanual
     # hyper parameters
     parser.add_argument('--switch_possibility', default=0.5, type=float)
     parser.add_argument('--mu', default=0.1, type=float)  # Reduced from 0.98 for stability with gradient clipping

@@ -7,7 +7,6 @@ Description: BimanualHandModel for bimanual grasping based on two HandModel inst
 import torch
 import numpy as np
 from .hand_model import HandModel
-from .rot6d import robust_compute_rotation_matrix_from_ortho6d
 
 
 class BimanualHandModel:
@@ -48,6 +47,8 @@ class BimanualHandModel:
             n_surface_points=reduced_surface_points,
             device=device
         )
+        # 왼손에 hand_side 속성 설정
+        self.left_hand.hand_side = 'left'
         
         self.right_hand = HandModel(
             mjcf_path=model_path+'/right_shadow_hand_wrist_free.xml',
@@ -57,6 +58,8 @@ class BimanualHandModel:
             n_surface_points=reduced_surface_points,
             device=device
         )
+        # 오른손에 hand_side 속성 설정
+        self.right_hand.hand_side = 'right'
         
         # Bimanual properties
         self.n_dofs = self.left_hand.n_dofs + self.right_hand.n_dofs  # 22 * 2 = 44

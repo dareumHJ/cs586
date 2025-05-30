@@ -172,7 +172,10 @@ class HandModel:
         """
         self.hand_pose = hand_pose
         self.global_translation = self.hand_pose[:, 0:3]
-        self.global_rotation = robust_compute_rotation_matrix_from_ortho6d(self.hand_pose[:, 3:9])
+        self.global_rotation = robust_compute_rotation_matrix_from_ortho6d(
+            self.hand_pose[:, 3:9], 
+            hand_side=getattr(self, 'hand_side', None)
+        )
         self.current_status = self.chain.forward_kinematics(self.hand_pose[:, 9:])
         if contact_point_indices is not None:
             self.contact_point_indices = contact_point_indices

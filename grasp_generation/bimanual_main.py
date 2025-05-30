@@ -305,14 +305,14 @@ for i in range(len(args.object_code_list)):
         
         # Process left hand pose
         left_qpos = dict(zip(left_joint_names, left_pose[9:].tolist()))
-        left_rot = robust_compute_rotation_matrix_from_ortho6d(left_pose[3:9].unsqueeze(0))[0]
+        left_rot = robust_compute_rotation_matrix_from_ortho6d(left_pose[3:9].unsqueeze(0), hand_side='left')[0]
         left_euler = transforms3d.euler.mat2euler(left_rot, axes='sxyz')
         left_qpos.update(dict(zip(left_rot_names, left_euler)))
         left_qpos.update(dict(zip(left_translation_names, left_pose[:3].tolist())))
         
         # Process right hand pose
         right_qpos = dict(zip(right_joint_names, right_pose[9:].tolist()))
-        right_rot = robust_compute_rotation_matrix_from_ortho6d(right_pose[3:9].unsqueeze(0))[0]
+        right_rot = robust_compute_rotation_matrix_from_ortho6d(right_pose[3:9].unsqueeze(0), hand_side='right')[0]
         right_euler = transforms3d.euler.mat2euler(right_rot, axes='sxyz')
         right_qpos.update(dict(zip(right_rot_names, right_euler)))
         right_qpos.update(dict(zip(right_translation_names, right_pose[:3].tolist())))
@@ -326,13 +326,13 @@ for i in range(len(args.object_code_list)):
         right_pose_st = initial_bimanual_pose[31:]
         
         left_qpos_st = dict(zip(left_joint_names, left_pose_st[9:].tolist()))
-        left_rot_st = robust_compute_rotation_matrix_from_ortho6d(left_pose_st[3:9].unsqueeze(0))[0]
+        left_rot_st = robust_compute_rotation_matrix_from_ortho6d(left_pose_st[3:9].unsqueeze(0), hand_side='left')[0]
         left_euler_st = transforms3d.euler.mat2euler(left_rot_st, axes='sxyz')
         left_qpos_st.update(dict(zip(left_rot_names, left_euler_st)))
         left_qpos_st.update(dict(zip(left_translation_names, left_pose_st[:3].tolist())))
         
         right_qpos_st = dict(zip(right_joint_names, right_pose_st[9:].tolist()))
-        right_rot_st = robust_compute_rotation_matrix_from_ortho6d(right_pose_st[3:9].unsqueeze(0))[0]
+        right_rot_st = robust_compute_rotation_matrix_from_ortho6d(right_pose_st[3:9].unsqueeze(0), hand_side='right')[0]
         right_euler_st = transforms3d.euler.mat2euler(right_rot_st, axes='sxyz')
         right_qpos_st.update(dict(zip(right_rot_names, right_euler_st)))
         right_qpos_st.update(dict(zip(right_translation_names, right_pose_st[:3].tolist())))
