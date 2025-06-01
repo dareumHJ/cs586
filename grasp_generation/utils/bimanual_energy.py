@@ -9,7 +9,8 @@ import numpy as np
 
 
 def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=100.0, w_spen=10.0, 
-                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, w_contact_sep=10.0, separation_threshold=0.025, verbose=False):
+                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, w_contact_sep=10.0, separation_threshold=0.025, 
+                       w_role_based=20.0, verbose=False):
     """
     Calculate bimanual energy function based on BimanGrasp paper
     
@@ -31,6 +32,12 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
         weight for inter-hand penetration term
     w_vew: float
         weight for wrench ellipse volume term
+    w_contact_sep: float
+        weight for contact region separation term
+    separation_threshold: float
+        threshold for contact separation
+    w_role_based: float
+        weight for role-based bimanual energy (supporting + stabilizing)
     verbose: bool
         whether to return individual energy terms
         
@@ -85,9 +92,12 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
     # E_contact_sep: Contact region separation (NEW)
     E_contact_sep = compute_contact_region_diversity_energy(bimanual_hand_model, object_model)
 
+    # E_role_based: Role-based bimanual energy (NEW)
+    E_role_based, E_support, E_stabilize = cal_role_based_bimanual_energy(bimanual_hand_model, object_model)
+
     # Check for NaN or infinite values for debugging
-    energy_components = [E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep]
-    component_names = ['E_fc', 'E_dis', 'E_pen', 'E_spen', 'E_joints', 'E_bimpen', 'E_vew', 'E_contact_sep']
+    energy_components = [E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_support, E_stabilize]
+    component_names = ['E_fc', 'E_dis', 'E_pen', 'E_spen', 'E_joints', 'E_bimpen', 'E_vew', 'E_contact_sep', 'E_support', 'E_stabilize']
     
     for i, (component, name) in enumerate(zip(energy_components, component_names)):
         if torch.isnan(component).any() or torch.isinf(component).any():
@@ -97,13 +107,13 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
                                              torch.full_like(component, 1000.0))
 
     # Unpack cleaned components
-    E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep = energy_components
+    E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_support, E_stabilize = energy_components
 
     if verbose:
-        total_energy = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep
-        return total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep
+        total_energy = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep + w_role_based * E_role_based
+        return total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_support, E_stabilize
     else:
-        return E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep
+        return E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep + w_role_based * E_role_based
 
 
 def cal_bimanual_force_closure(bimanual_hand_model, contact_normal, device):
@@ -392,3 +402,204 @@ def cal_bimanual_energy_with_separation(bimanual_hand_model, object_model,
     energy_with_sep = energy + w_contact_sep * E_contact_sep
     
     return energy_with_sep, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep
+
+
+def identify_hand_roles(bimanual_hand_model):
+    """
+    Identify which hand is supporting (lower) and which is stabilizing (upper)
+    based on z-coordinates of hand centers
+    
+    Parameters
+    ----------
+    bimanual_hand_model: BimanualHandModel
+        bimanual hand model
+        
+    Returns
+    -------
+    is_left_lower: torch.BoolTensor (B,)
+        True if left hand is lower (supporting), False if right hand is lower
+    lower_hand_center: torch.FloatTensor (B, 3)
+        center position of lower hand
+    upper_hand_center: torch.FloatTensor (B, 3)
+        center position of upper hand
+    """
+    batch_size = bimanual_hand_model.bimanual_pose.shape[0]
+    device = bimanual_hand_model.bimanual_pose.device
+    
+    # Get hand center positions (translation part of pose)
+    left_center = bimanual_hand_model.bimanual_pose[:, :3]  # (B, 3) - left hand translation
+    right_center = bimanual_hand_model.bimanual_pose[:, 31:34]  # (B, 3) - right hand translation
+    
+    # Compare z-coordinates to determine which hand is lower
+    is_left_lower = left_center[:, 2] < right_center[:, 2]  # (B,)
+    
+    # Get lower and upper hand centers
+    lower_hand_center = torch.where(
+        is_left_lower.unsqueeze(1),  # (B, 1)
+        left_center,  # (B, 3)
+        right_center  # (B, 3)
+    )
+    
+    upper_hand_center = torch.where(
+        is_left_lower.unsqueeze(1),  # (B, 1)
+        right_center,  # (B, 3)
+        left_center   # (B, 3)
+    )
+    
+    return is_left_lower, lower_hand_center, upper_hand_center
+
+
+def cal_supporting_hand_energy(bimanual_hand_model, object_model, lower_hand_center):
+    """
+    Calculate energy for supporting (lower) hand
+    Measures how well the lower hand supports the object's center of mass
+    
+    Parameters
+    ----------
+    bimanual_hand_model: BimanualHandModel
+        bimanual hand model
+    object_model: ObjectModel
+        object model
+    lower_hand_center: torch.FloatTensor (B, 3)
+        center position of lower hand
+        
+    Returns
+    -------
+    E_support: torch.FloatTensor (B,)
+        supporting hand energy
+    """
+    batch_size = lower_hand_center.shape[0]
+    device = lower_hand_center.device
+    
+    # Object center is at origin (0, 0, 0) in object coordinate system
+    object_center = torch.zeros(batch_size, 3, device=device)  # (B, 3)
+    
+    # Calculate horizontal distance between hand center and object center
+    horizontal_distance = torch.norm(
+        lower_hand_center[:, :2] - object_center[:, :2], 
+        dim=1
+    )  # (B,)
+    
+    # Calculate vertical offset: how much below the object center is the hand
+    vertical_offset = object_center[:, 2] - lower_hand_center[:, 2]  # (B,)
+    
+    # Supporting hand should be:
+    # 1. Horizontally close to object center (small horizontal_distance)
+    # 2. Vertically below object center (positive vertical_offset)
+    
+    # Horizontal support energy: penalize horizontal deviation
+    horizontal_penalty = horizontal_distance ** 2
+    
+    # Vertical support energy: penalize if hand is not below object
+    # Use ReLU to only penalize when hand is above object center
+    vertical_penalty = torch.relu(-vertical_offset) ** 2
+    
+    # Combined supporting energy
+    E_support = horizontal_penalty + vertical_penalty
+    
+    return E_support
+
+
+def cal_stabilizing_hand_energy(bimanual_hand_model, object_model, is_left_lower):
+    """
+    Calculate energy for stabilizing (upper) hand using force closure
+    
+    Parameters
+    ----------
+    bimanual_hand_model: BimanualHandModel
+        bimanual hand model
+    object_model: ObjectModel
+        object model  
+    is_left_lower: torch.BoolTensor (B,)
+        True if left hand is lower, False if right hand is lower
+        
+    Returns
+    -------
+    E_stabilize: torch.FloatTensor (B,)
+        stabilizing hand energy
+    """
+    batch_size = bimanual_hand_model.bimanual_pose.shape[0]
+    device = bimanual_hand_model.bimanual_pose.device
+    
+    # Get contact points for upper hand only
+    left_contact_points = bimanual_hand_model.left_hand.contact_points  # (B, 4, 3)
+    right_contact_points = bimanual_hand_model.right_hand.contact_points  # (B, 4, 3)
+    
+    # Select contact points from upper hand
+    upper_contact_points = torch.where(
+        is_left_lower.unsqueeze(1).unsqueeze(2),  # (B, 1, 1)
+        right_contact_points,  # (B, 4, 3) - right is upper
+        left_contact_points    # (B, 4, 3) - left is upper
+    )
+    
+    # Calculate contact normals for upper hand contact points
+    distance, contact_normal = object_model.cal_distance(upper_contact_points)  # (B, 4), (B, 4, 3)
+    
+    # Calculate force closure for upper hand (4 contact points)
+    n_contact = upper_contact_points.shape[1]  # 4
+    
+    # Reshape contact normal for matrix operations
+    contact_normal = contact_normal.reshape(batch_size, 1, 3 * n_contact)  # (B, 1, 12)
+    
+    # Transformation matrix for cross product operations
+    transformation_matrix = torch.tensor([[0, 0, 0, 0, 0, -1, 0, 1, 0],
+                                          [0, 0, 1, 0, 0, 0, -1, 0, 0],
+                                          [0, -1, 0, 1, 0, 0, 0, 0, 0]],
+                                         dtype=torch.float, device=device)
+    
+    # Build grasp matrix G for upper hand (4 contact points)
+    identity_part = torch.eye(3, dtype=torch.float, device=device).expand(
+        batch_size, n_contact, 3, 3
+    ).reshape(batch_size, 3 * n_contact, 3)  # (B, 12, 3)
+    
+    moment_part = (upper_contact_points @ transformation_matrix).view(
+        batch_size, 3 * n_contact, 3
+    )  # (B, 12, 3)
+    
+    g = torch.cat([identity_part, moment_part], dim=2).float().to(device)  # (B, 12, 6)
+    
+    # Calculate ||Gc||^2 where c is contact normal
+    gc = contact_normal @ g  # (B, 1, 6)
+    norm = torch.norm(gc, dim=[1, 2])  # (B,)
+    E_stabilize = norm * norm
+    
+    return E_stabilize
+
+
+def cal_role_based_bimanual_energy(bimanual_hand_model, object_model):
+    """
+    Calculate role-based bimanual energy where lower hand supports and upper hand stabilizes
+    
+    Parameters
+    ----------
+    bimanual_hand_model: BimanualHandModel
+        bimanual hand model
+    object_model: ObjectModel
+        object model
+        
+    Returns
+    -------
+    E_role_based: torch.FloatTensor (B,)
+        total role-based energy
+    E_support: torch.FloatTensor (B,)
+        supporting hand energy
+    E_stabilize: torch.FloatTensor (B,)
+        stabilizing hand energy
+    """
+    # Internal weights (fixed ratios)
+    w_support_internal = 1.0      # Supporting hand weight
+    w_stabilize_internal = 1.5    # Stabilizing hand weight (slightly higher)
+    
+    # Identify hand roles
+    is_left_lower, lower_hand_center, upper_hand_center = identify_hand_roles(bimanual_hand_model)
+    
+    # Calculate supporting hand energy (lower hand)
+    E_support = cal_supporting_hand_energy(bimanual_hand_model, object_model, lower_hand_center)
+    
+    # Calculate stabilizing hand energy (upper hand)
+    E_stabilize = cal_stabilizing_hand_energy(bimanual_hand_model, object_model, is_left_lower)
+    
+    # Combine energies with internal weights
+    E_role_based = w_support_internal * E_support + w_stabilize_internal * E_stabilize
+    
+    return E_role_based, E_support, E_stabilize

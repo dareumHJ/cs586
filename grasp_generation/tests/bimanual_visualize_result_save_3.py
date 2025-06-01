@@ -19,6 +19,74 @@ import plotly.graph_objects as go
 from utils.bimanual_hand_model import BimanualHandModel
 from utils.object_model import ObjectModel
 
+# Add monkey patch for ObjectModel to support direct path initialization
+def initialize_from_path(self, object_path, object_code):
+    """
+    Initialize Object Model with direct mesh path
+    
+    Parameters
+    ----------
+    object_path: str
+        direct path to mesh file (.obj or .urdf)
+    object_code: str
+        object code for identification
+    """
+    import trimesh as tm
+    import pytorch3d.structures
+    import pytorch3d.ops
+    from torchsdf import index_vertices_by_faces
+    
+    self.object_code_list = [object_code]
+    self.object_scale_tensor = []
+    self.object_mesh_list = []
+    self.object_face_verts_list = []
+    self.surface_points_tensor = []
+    
+    # Handle scale
+    if self.fixed_scale is not None:
+        scale_tensor = torch.full((self.batch_size_each,), self.fixed_scale, device=self.device)
+        self.object_scale_tensor.append(scale_tensor)
+    else:
+        self.object_scale_tensor.append(self.scale_choice[torch.randint(0, self.scale_choice.shape[0], (self.batch_size_each, ), device=self.device)])
+    
+    # Load mesh from direct path
+    # Handle both .urdf and .obj files
+    if object_path.endswith('.urdf'):
+        # For .urdf files, look for decomposed.obj in the same directory
+        mesh_path = os.path.join(os.path.dirname(object_path), "decomposed.obj")
+        if not os.path.exists(mesh_path):
+            # If decomposed.obj doesn't exist, try to find any .obj file in the directory
+            obj_files = [f for f in os.listdir(os.path.dirname(object_path)) if f.endswith('.obj')]
+            if obj_files:
+                mesh_path = os.path.join(os.path.dirname(object_path), obj_files[0])
+            else:
+                raise FileNotFoundError(f"No .obj file found in {os.path.dirname(object_path)}")
+    else:
+        mesh_path = object_path
+    
+    print(f"Loading mesh from: {mesh_path}")
+    self.object_mesh_list.append(tm.load(mesh_path, force="mesh", process=False))
+    
+    object_verts = torch.Tensor(self.object_mesh_list[-1].vertices).to(self.device)
+    object_faces = torch.Tensor(self.object_mesh_list[-1].faces).long().to(self.device)
+    self.object_face_verts_list.append(index_vertices_by_faces(object_verts, object_faces))
+    
+    if self.num_samples != 0:
+        vertices = torch.tensor(self.object_mesh_list[-1].vertices, dtype=torch.float, device=self.device)
+        faces = torch.tensor(self.object_mesh_list[-1].faces, dtype=torch.float, device=self.device)
+        mesh = pytorch3d.structures.Meshes(vertices.unsqueeze(0), faces.unsqueeze(0))
+        dense_point_cloud = pytorch3d.ops.sample_points_from_meshes(mesh, num_samples=100 * self.num_samples)
+        surface_points = pytorch3d.ops.sample_farthest_points(dense_point_cloud, K=self.num_samples)[0][0]
+        surface_points.to(dtype=float, device=self.device)
+        self.surface_points_tensor.append(surface_points)
+    
+    self.object_scale_tensor = torch.stack(self.object_scale_tensor, dim=0)
+    if self.num_samples != 0:
+        self.surface_points_tensor = torch.stack(self.surface_points_tensor, dim=0).repeat_interleave(self.batch_size_each, dim=0)
+
+# Add the method to ObjectModel class
+ObjectModel.initialize_from_path = initialize_from_path
+
 # Original joint and pose names
 translation_names = ['WRJTx', 'WRJTy', 'WRJTz']
 rot_names = ['WRJRx', 'WRJRy', 'WRJRz']
@@ -63,14 +131,21 @@ def extract_bimanual_pose(qpos, device='cpu'):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # parser.add_argument('--object_code', type=str, default='core-mug-8570d9a8d24cb0acbebd3c0c0c70fb03')
-    parser.add_argument('--object_code', type=str, default='sem-Bottle-437678d4bc6be981c8724d5673a063a6')
-    
+    # parser.add_argument('--object_code', type=str, default='sem-Bottle-437678d4bc6be981c8724d5673a063a6')
+    parser.add_argument('--object_path', type=str, default='/home/dareum/cs586/data/meshdata_one/shark/coacd/decomposed.obj')
     parser.add_argument('--result_path', type=str, default='../data/bimanual_graspdata')
     parser.add_argument('--output_file', type=str, default='bimanual_grasp_result.html')
     args = parser.parse_args()
 
+    # Extract object_code from path for compatibility
+    # Example: /home/dareum/cs586/data/meshdata_one/shark/coacd/coacd.urdf -> shark
+    object_code = os.path.basename(os.path.dirname(os.path.dirname(args.object_path)))
+    print(f"Using object path: {args.object_path}")
+    print(f"Extracted object_code: {object_code}")
+
     # Create list of grasp indices to visualize
     numlist = [0, 1, 2, 3, 10, 30, 50, 70, 90]
+    # numlist = [0]
 
     device = 'cpu'
 
@@ -83,7 +158,7 @@ if __name__ == '__main__':
         print(f"Directory already exists: {output_dir}")
 
     # Load bimanual grasp results
-    grasp_file = os.path.join(args.result_path, f'bimanual_{args.object_code}.npy')
+    grasp_file = os.path.join(args.result_path, f'bimanual_{object_code}.npy')
     if not os.path.exists(grasp_file):
         print(f"Error: Grasp file not found: {grasp_file}")
         exit(1)
@@ -107,12 +182,14 @@ if __name__ == '__main__':
 
     # Create object model
     object_model = ObjectModel(
-        data_root_path='../data/meshdata',
+        data_root_path='../data/meshdata_one',
         batch_size_each=1,
         num_samples=2000, 
         device=device
     )
-    object_model.initialize(args.object_code)
+    
+    # Initialize with direct path instead of object_code
+    object_model.initialize_from_path(args.object_path, object_code)
 
     # Generate HTML files for each grasp in numlist
     for num in numlist:
@@ -185,7 +262,7 @@ if __name__ == '__main__':
         # Set layout
         fig.update_layout(
             scene_aspectmode='data',
-            title=f'Bimanual Grasp Visualization - {args.object_code} (Index {num})',
+            title=f'Bimanual Grasp Visualization - {object_code} (Index {num})',
             scene=dict(
                 xaxis_title='X',
                 yaxis_title='Y',
@@ -201,7 +278,7 @@ if __name__ == '__main__':
         # Save result
         fig.write_html(output_path, auto_open=False)
         print(f"Bimanual grasp visualization saved to: {output_path}")
-        print(f"  Object: {args.object_code}")
+        print(f"  Object: {object_code}")
         print(f"  Grasp index: {num}")
         print(f"  Scale: {data_dict['scale']}")
     
