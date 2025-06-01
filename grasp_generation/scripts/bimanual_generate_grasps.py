@@ -41,7 +41,7 @@ os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 np.seterr(all='raise')
 
 
-def load_config(config_path='config.json'):
+def load_config(config_path='../config.json'):
     """Load configuration from JSON file"""
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Config file {config_path} not found")
@@ -207,7 +207,7 @@ def generate(args_list):
     logger.info(f"Objects: {object_code_list}")
     logger.info(f"Configuration: batch_size_each={args.batch_size_each}, n_iter={args.n_iter}")
     logger.info(f"Hyperparameters: mu={args.mu}, step_size={args.step_size}, starting_temp={args.starting_temperature}")
-    logger.info(f"Energy weights: w_dis={args.w_dis}, w_pen={args.w_pen}, w_spen={args.w_spen}, w_joints={args.w_joints}, w_bimpen={args.w_bimpen}, w_vew={args.w_vew}")
+    logger.info(f"Energy weights: w_dis={args.w_dis}, w_pen={args.w_pen}, w_spen={args.w_spen}, w_joints={args.w_joints}, w_bimpen={args.w_bimpen}, w_vew={args.w_vew}, w_contact_sep={args.w_contact_sep}, separation_threshold={args.separation_threshold}")
     
     # Initialize wandb for this worker
     if not args.disable_wandb:
@@ -240,6 +240,8 @@ def generate(args_list):
                 "w_joints": args.w_joints,
                 "w_bimpen": args.w_bimpen,
                 "w_vew": args.w_vew,
+                "w_contact_sep": args.w_contact_sep,
+                "separation_threshold": args.separation_threshold,
                 
                 # Initialization settings
                 "jitter_strength": args.jitter_strength,
@@ -364,13 +366,15 @@ def generate(args_list):
         w_joints=args.w_joints,
         w_bimpen=args.w_bimpen,  # NEW: Inter-hand penetration
         w_vew=args.w_vew,        # NEW: Wrench ellipse volume
+        w_contact_sep=args.w_contact_sep,
+        separation_threshold=args.separation_threshold
     )
     
     # IMPORTANT: Reset gradient to None before initial calculation
     bimanual_hand_model.bimanual_pose.grad = None
     
     # Calculate initial energy with proper gradient tracking
-    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = cal_bimanual_energy(
+    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep = cal_bimanual_energy(
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
     # Ensure gradient calculation is working by computing scalar loss
@@ -417,6 +421,7 @@ def generate(args_list):
             "initial/E_joints_mean": E_joints.mean().item(),
             "initial/E_bimpen_mean": E_bimpen.mean().item(),
             "initial/E_vew_mean": E_vew.mean().item(),
+            "initial/E_contact_sep_mean": E_contact_sep.mean().item(),
             "initial/gradient_norm": initial_grad_norm,
             "step": 0
         }
@@ -438,7 +443,7 @@ def generate(args_list):
             actual_step_taken = torch.norm(pose_after_try_step.detach() - pose_before_step.detach(), dim=1).mean().item()
 
         optimizer.zero_grad()
-        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew = cal_bimanual_energy(
+        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep = cal_bimanual_energy(
             bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
         # new_energy.sum().backward(retain_graph=True)
@@ -461,6 +466,7 @@ def generate(args_list):
         E_joints = torch.where(accept, new_E_joints, E_joints)
         E_bimpen = torch.where(accept, new_E_bimpen, E_bimpen)
         E_vew = torch.where(accept, new_E_vew, E_vew)
+        E_contact_sep = torch.where(accept, new_E_contact_sep, E_contact_sep)
         
         # Detailed step analysis for logging (use detach only for logging)
         with torch.no_grad():
@@ -510,7 +516,7 @@ def generate(args_list):
             
             # DEBUG: Log individual energy components to see what's changing
             logger.info(f"  Energy Components - FC: {new_E_fc.mean().item():.4f}, Dis: {new_E_dis.mean().item():.4f}, Pen: {new_E_pen.mean().item():.4f}")
-            logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}")
+            logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}, SEP: {new_E_contact_sep.mean().item():.4f}")
             
             # DEBUG: Check if contact points are actually changing
             if step > 1 and hasattr(bimanual_hand_model, 'contact_points') and bimanual_hand_model.contact_points is not None:
@@ -584,6 +590,9 @@ def generate(args_list):
                     
                     "energy/E_vew_mean": E_vew.mean().item(),
                     "energy/E_vew_std": E_vew.std().item(),
+
+                    "energy/E_contact_sep_mean": E_contact_sep.mean().item(),
+                    "energy/E_contact_sep_std": E_contact_sep.std().item(),
                 }
                 
                 # Add percentage of successful grasps (below thresholds)
@@ -689,7 +698,12 @@ def generate(args_list):
                 E_joints=E_joints[idx].item(),
                 E_bimpen=E_bimpen[idx].item(),  # NEW
                 E_vew=E_vew[idx].item(),        # NEW
+                E_contact_sep=E_contact_sep[idx].item() # NEW
             ))
+        
+        # Sort data_list by total energy (ascending order - lowest energy first)
+        data_list.sort(key=lambda x: x['energy'])
+        
         np.save(os.path.join(args.result_path, 'bimanual_' + object_code + '.npy'), data_list, allow_pickle=True)
 
     logger.info(f"Results saved for {len(object_code_list)} objects")
@@ -708,6 +722,7 @@ def generate(args_list):
             "final/E_joints_mean": E_joints.mean().item(),
             "final/E_bimpen_mean": E_bimpen.mean().item(),
             "final/E_vew_mean": E_vew.mean().item(),
+            "final/E_contact_sep_mean": E_contact_sep.mean().item(),
             "final/good_fc_pct": (E_fc < args.thres_fc).float().mean().item() * 100,
             "final/good_dis_pct": (E_dis < args.thres_dis).float().mean().item() * 100,
             "final/good_pen_pct": (E_pen < args.thres_pen).float().mean().item() * 100,
@@ -775,9 +790,11 @@ if __name__ == '__main__':
         args.w_joints = config.get('w_joints', 1.0)
         args.w_bimpen = config.get('w_bimpen', 50.0)
         args.w_vew = config.get('w_vew', 1.0)
+        args.w_contact_sep = config.get('w_contact_sep', 10.0)
+        args.separation_threshold = config.get('separation_threshold', 0.025)
         print(f'Loaded config: n_iter = {args.n_iter}')
         print(f'Loaded config: w_dis = {args.w_dis}, w_pen = {args.w_pen}, w_spen = {args.w_spen}')
-        print(f'Loaded config: w_joints = {args.w_joints}, w_bimpen = {args.w_bimpen}, w_vew = {args.w_vew}')
+        print(f'Loaded config: w_joints = {args.w_joints}, w_bimpen = {args.w_bimpen}, w_vew = {args.w_vew}, w_contact_sep = {args.w_contact_sep}, separation_threshold = {args.separation_threshold}')
     except FileNotFoundError:
         print("Warning: config.json not found, using default values")
         args.n_iter = 1000  # Default value
@@ -787,6 +804,8 @@ if __name__ == '__main__':
         args.w_joints = 1.0
         args.w_bimpen = 50.0
         args.w_vew = 1.0
+        args.w_contact_sep = 15.0
+        args.separation_threshold = 0.025
 
     gpu_list = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     print(f'gpu_list: {gpu_list}')

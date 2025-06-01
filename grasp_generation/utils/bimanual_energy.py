@@ -9,7 +9,7 @@ import numpy as np
 
 
 def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=100.0, w_spen=10.0, 
-                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, verbose=False):
+                       w_joints=1.0, w_bimpen=50.0, w_vew=1.0, w_contact_sep=10.0, separation_threshold=0.025, verbose=False):
     """
     Calculate bimanual energy function based on BimanGrasp paper
     
@@ -82,9 +82,12 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
     # E_bimpen: Inter-hand penetration (NEW)
     E_bimpen = bimanual_hand_model.inter_hand_penetration()
 
+    # E_contact_sep: Contact region separation (NEW)
+    E_contact_sep = compute_contact_region_diversity_energy(bimanual_hand_model, object_model)
+
     # Check for NaN or infinite values for debugging
-    energy_components = [E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew]
-    component_names = ['E_fc', 'E_dis', 'E_pen', 'E_spen', 'E_joints', 'E_bimpen', 'E_vew']
+    energy_components = [E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep]
+    component_names = ['E_fc', 'E_dis', 'E_pen', 'E_spen', 'E_joints', 'E_bimpen', 'E_vew', 'E_contact_sep']
     
     for i, (component, name) in enumerate(zip(energy_components, component_names)):
         if torch.isnan(component).any() or torch.isinf(component).any():
@@ -94,13 +97,13 @@ def cal_bimanual_energy(bimanual_hand_model, object_model, w_dis=100.0, w_pen=10
                                              torch.full_like(component, 1000.0))
 
     # Unpack cleaned components
-    E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = energy_components
+    E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep = energy_components
 
     if verbose:
-        total_energy = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew
-        return total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew
+        total_energy = E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep
+        return total_energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep
     else:
-        return E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew
+        return E_fc + w_dis * E_dis + w_pen * E_pen + w_spen * E_spen + w_joints * E_joints + w_bimpen * E_bimpen + w_vew * E_vew + w_contact_sep * E_contact_sep
 
 
 def cal_bimanual_force_closure(bimanual_hand_model, contact_normal, device):
@@ -268,3 +271,124 @@ def cal_hand_object_penetration(bimanual_hand_model, object_model):
 
     
     return left_distances.sum(-1) + right_distances.sum(-1)
+
+
+def _compute_contact_points_separation(bimanual_hand_model, separation_threshold):
+    """
+    Method 2: Direct distance between contact points from both hands
+    """
+    batch_size = bimanual_hand_model.bimanual_pose.shape[0]
+    device = bimanual_hand_model.bimanual_pose.device
+    
+    left_contact_points = bimanual_hand_model.left_hand.contact_points  # [B, n_contact, 3]
+    right_contact_points = bimanual_hand_model.right_hand.contact_points  # [B, n_contact, 3]
+    
+    # Compute pairwise distances between left and right contact points
+    # [B, n_left_contact, n_right_contact]
+    distances = torch.cdist(left_contact_points, right_contact_points)
+    
+    # Find minimum distance for each batch
+    min_distances = distances.min(dim=-1)[0].min(dim=-1)[0]  # [B]
+    
+    # Apply penalty for distances below threshold
+    violation_mask = min_distances < separation_threshold
+    energy = torch.where(
+        violation_mask,
+        (separation_threshold - min_distances) ** 2,
+        torch.zeros_like(min_distances)
+    )
+    
+    return energy
+
+
+def _project_to_surface(contact_points, surface_points):
+    """
+    Project contact points to nearest surface points
+    
+    Args:
+        contact_points: [n_contact, 3]
+        surface_points: [n_surface, 3]
+    
+    Returns:
+        projected_points: [n_contact, 3]
+    """
+    distances = torch.cdist(contact_points, surface_points)  # [n_contact, n_surface]
+    nearest_indices = distances.argmin(dim=1)  # [n_contact]
+    projected_points = surface_points[nearest_indices]  # [n_contact, 3]
+    return projected_points
+
+
+def compute_contact_region_diversity_energy(bimanual_hand_model, object_model):
+    """
+    Alternative approach: Encourage contact points to cover different regions
+    This promotes natural separation without hard constraints
+    """
+    batch_size = bimanual_hand_model.bimanual_pose.shape[0]
+    device = bimanual_hand_model.bimanual_pose.device
+    
+    left_contact_points = bimanual_hand_model.left_hand.contact_points
+    right_contact_points = bimanual_hand_model.right_hand.contact_points
+    
+    # Combine all contact points
+    all_contact_points = torch.cat([left_contact_points, right_contact_points], dim=1)  # [B, 2*n_contact, 3]
+    
+    energy = torch.zeros(batch_size, device=device)
+    
+    for b in range(batch_size):
+        contacts = all_contact_points[b]  # [2*n_contact, 3]
+        n_total = contacts.shape[0]
+        n_left = left_contact_points.shape[1]
+        
+        # Compute pairwise distances
+        distances = torch.cdist(contacts, contacts)  # [2*n_contact, 2*n_contact]
+        
+        # Separate into left-left, right-right, and left-right distances
+        left_left_dist = distances[:n_left, :n_left]
+        right_right_dist = distances[n_left:, n_left:]
+        left_right_dist = distances[:n_left, n_left:]
+        
+        # We want left-right distances to be large (good separation)
+        # and left-left, right-right distances to be reasonable (good coverage)
+        
+        # Penalty for too-close inter-hand contacts
+        min_inter_distance = left_right_dist.min()
+        separation_penalty = torch.exp(-min_inter_distance * 50)  # exponential penalty
+        
+        # Bonus for good intra-hand coverage (not too clustered)
+        left_coverage = left_left_dist.mean()
+        right_coverage = right_right_dist.mean()
+        coverage_bonus = -0.1 * (left_coverage + right_coverage)  # negative = bonus
+        
+        energy[b] = separation_penalty + coverage_bonus
+    
+    return energy
+
+
+# Integration with existing energy function
+def cal_bimanual_energy_with_separation(bimanual_hand_model, object_model, 
+                                       w_contact_sep=10.0, 
+                                       separation_method='contact_points',
+                                       separation_threshold=0.02,
+                                       **kwargs):
+    """
+    Extended energy calculation including contact region separation
+    
+    Args:
+        w_contact_sep: weight for contact separation energy
+        separation_method: method for computing separation
+        separation_threshold: minimum separation distance
+    """
+    # Compute original energy components (you'll need to import the original function)
+    # energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = cal_bimanual_energy(...)
+    
+    # Compute contact separation energy
+    E_contact_sep = compute_contact_region_separation_energy(
+        bimanual_hand_model, object_model, 
+        separation_threshold=separation_threshold,
+        method=separation_method
+    )
+    
+    # Add to total energy
+    energy_with_sep = energy + w_contact_sep * E_contact_sep
+    
+    return energy_with_sep, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep
