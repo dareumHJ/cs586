@@ -17,7 +17,7 @@ from torchsdf import index_vertices_by_faces, compute_sdf
 
 class ObjectModel:
 
-    def __init__(self, data_root_path, batch_size_each, num_samples=2000, device="cuda"):
+    def __init__(self, data_root_path, batch_size_each, num_samples=2000, device="cuda", fixed_scale=None):
         """
         Create a Object Model
         
@@ -31,12 +31,15 @@ class ObjectModel:
             numbers of object surface points, sampled with fps
         device: str | torch.Device
             device for torch tensors
+        fixed_scale: float
+            fixed scale for all objects
         """
 
         self.device = device
         self.batch_size_each = batch_size_each
         self.data_root_path = data_root_path
         self.num_samples = num_samples
+        self.fixed_scale = fixed_scale
 
         self.object_code_list = None
         self.object_scale_tensor = None
@@ -63,7 +66,11 @@ class ObjectModel:
         self.object_face_verts_list = []
         self.surface_points_tensor = []
         for object_code in object_code_list:
-            self.object_scale_tensor.append(self.scale_choice[torch.randint(0, self.scale_choice.shape[0], (self.batch_size_each, ), device=self.device)])
+            if self.fixed_scale is not None:
+                scale_tensor = torch.full((self.batch_size_each,), self.fixed_scale, device=self.device)
+                self.object_scale_tensor.append(scale_tensor)
+            else:
+                self.object_scale_tensor.append(self.scale_choice[torch.randint(0, self.scale_choice.shape[0], (self.batch_size_each, ), device=self.device)])
             self.object_mesh_list.append(tm.load(os.path.join(self.data_root_path, object_code, "coacd", "decomposed.obj"), force="mesh", process=False))
             object_verts = torch.Tensor(self.object_mesh_list[-1].vertices).to(self.device)
             object_faces = torch.Tensor(self.object_mesh_list[-1].faces).long().to(self.device)
