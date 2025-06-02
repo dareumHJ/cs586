@@ -10,5 +10,7 @@
     "_note": "Add more configuration parameters here as needed",
     "w_joints": 40.0,
     "w_vew": 10.0,
+    "w_gravity_support": 10.0,
+    "w_vertical_stability": 10.0,
     "save_num": 3
 } 

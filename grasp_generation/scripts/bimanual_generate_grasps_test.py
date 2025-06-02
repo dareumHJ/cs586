@@ -387,7 +387,7 @@ def generate(args_list):
     bimanual_hand_model.bimanual_pose.grad = None
     
     # Calculate initial energy with proper gradient tracking
-    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep = cal_bimanual_energy(
+    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_gravity_support, E_vertical_stability = cal_bimanual_energy(
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
     # Store initial energy data
@@ -400,7 +400,9 @@ def generate(args_list):
         'E_joints': E_joints.clone(),
         'E_bimpen': E_bimpen.clone(),
         'E_vew': E_vew.clone(),
-        'E_contact_sep': E_contact_sep.clone()
+        'E_contact_sep': E_contact_sep.clone(),
+        'E_gravity_support': E_gravity_support.clone(),
+        'E_vertical_stability': E_vertical_stability.clone()
     }
 
     # Ensure gradient calculation is working by computing scalar loss
@@ -448,6 +450,8 @@ def generate(args_list):
             "initial/E_bimpen_mean": E_bimpen.mean().item(),
             "initial/E_vew_mean": E_vew.mean().item(),
             "initial/E_contact_sep_mean": E_contact_sep.mean().item(),
+            "initial/E_gravity_support_mean": E_gravity_support.mean().item(),
+            "initial/E_vertical_stability_mean": E_vertical_stability.mean().item(),
             "initial/gradient_norm": initial_grad_norm,
             "step": 0
         }
@@ -469,7 +473,7 @@ def generate(args_list):
             actual_step_taken = torch.norm(pose_after_try_step.detach() - pose_before_step.detach(), dim=1).mean().item()
 
         optimizer.zero_grad()
-        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep = cal_bimanual_energy(
+        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep, new_E_gravity_support, new_E_vertical_stability = cal_bimanual_energy(
             bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
         # new_energy.sum().backward(retain_graph=True)
@@ -493,6 +497,8 @@ def generate(args_list):
         E_bimpen = torch.where(accept, new_E_bimpen, E_bimpen)
         E_vew = torch.where(accept, new_E_vew, E_vew)
         E_contact_sep = torch.where(accept, new_E_contact_sep, E_contact_sep)
+        E_gravity_support = torch.where(accept, new_E_gravity_support, E_gravity_support)
+        E_vertical_stability = torch.where(accept, new_E_vertical_stability, E_vertical_stability)
         
         # Detailed step analysis for logging (use detach only for logging)
         with torch.no_grad():
@@ -543,6 +549,7 @@ def generate(args_list):
             # DEBUG: Log individual energy components to see what's changing
             logger.info(f"  Energy Components - FC: {new_E_fc.mean().item():.4f}, Dis: {new_E_dis.mean().item():.4f}, Pen: {new_E_pen.mean().item():.4f}")
             logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}, SEP: {new_E_contact_sep.mean().item():.4f}")
+            logger.info(f"  Energy Components - Gravity: {new_E_gravity_support.mean().item():.4f}, Vertical: {new_E_vertical_stability.mean().item():.4f}")
             
             # DEBUG: Check if contact points are actually changing
             if step > 1 and hasattr(bimanual_hand_model, 'contact_points') and bimanual_hand_model.contact_points is not None:
@@ -619,6 +626,12 @@ def generate(args_list):
                     
                     "energy/E_contact_sep_mean": E_contact_sep.mean().item(),
                     "energy/E_contact_sep_std": E_contact_sep.std().item(),
+                    
+                    "energy/E_gravity_support_mean": E_gravity_support.mean().item(),
+                    "energy/E_gravity_support_std": E_gravity_support.std().item(),
+                    
+                    "energy/E_vertical_stability_mean": E_vertical_stability.mean().item(),
+                    "energy/E_vertical_stability_std": E_vertical_stability.std().item(),
                 }
                 
                 # Add percentage of successful grasps (below thresholds)
@@ -650,7 +663,9 @@ def generate(args_list):
                 'E_joints': E_joints.clone(),
                 'E_bimpen': E_bimpen.clone(),
                 'E_vew': E_vew.clone(),
-                'E_contact_sep': E_contact_sep.clone()
+                'E_contact_sep': E_contact_sep.clone(),
+                'E_gravity_support': E_gravity_support.clone(),
+                'E_vertical_stability': E_vertical_stability.clone()
             }
             logger.info(f"Saved intermediate result at epoch {step}")
 
@@ -670,7 +685,9 @@ def generate(args_list):
         'E_joints': E_joints.clone(),
         'E_bimpen': E_bimpen.clone(),
         'E_vew': E_vew.clone(),
-        'E_contact_sep': E_contact_sep.clone()
+        'E_contact_sep': E_contact_sep.clone(),
+        'E_gravity_support': E_gravity_support.clone(),
+        'E_vertical_stability': E_vertical_stability.clone()
     }
 
     # save results
@@ -777,7 +794,9 @@ def generate(args_list):
                     'E_joints': energy_dict['E_joints'][idx].item(),
                     'E_bimpen': energy_dict['E_bimpen'][idx].item(),
                     'E_vew': energy_dict['E_vew'][idx].item(),
-                    'E_contact_sep': energy_dict['E_contact_sep'][idx].item()
+                    'E_contact_sep': energy_dict['E_contact_sep'][idx].item(),
+                    'E_gravity_support': energy_dict['E_gravity_support'][idx].item(),
+                    'E_vertical_stability': energy_dict['E_vertical_stability'][idx].item()
                 }
             
             data_list.append(dict(
@@ -794,6 +813,8 @@ def generate(args_list):
                 E_joints=E_joints[idx].item(),
                 E_bimpen=E_bimpen[idx].item(),  # NEW
                 E_vew=E_vew[idx].item(),        # NEW
+                E_gravity_support=E_gravity_support[idx].item(),
+                E_vertical_stability=E_vertical_stability[idx].item(),
             ))
         np.save(os.path.join(args.result_path, 'bimanual_' + object_code + '.npy'), data_list, allow_pickle=True)
 
@@ -813,6 +834,8 @@ def generate(args_list):
             "final/E_joints_mean": E_joints.mean().item(),
             "final/E_bimpen_mean": E_bimpen.mean().item(),
             "final/E_vew_mean": E_vew.mean().item(),
+            "final/E_gravity_support_mean": E_gravity_support.mean().item(),
+            "final/E_vertical_stability_mean": E_vertical_stability.mean().item(),
             "final/good_fc_pct": (E_fc < args.thres_fc).float().mean().item() * 100,
             "final/good_dis_pct": (E_dis < args.thres_dis).float().mean().item() * 100,
             "final/good_pen_pct": (E_pen < args.thres_pen).float().mean().item() * 100,

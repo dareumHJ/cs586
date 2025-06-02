@@ -132,7 +132,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # parser.add_argument('--object_code', type=str, default='core-mug-8570d9a8d24cb0acbebd3c0c0c70fb03')
     # parser.add_argument('--object_code', type=str, default='sem-Bottle-437678d4bc6be981c8724d5673a063a6')
-    parser.add_argument('--object_path', type=str, default='/home/dareum/cs586/data/meshdata_one/shark/coacd/decomposed.obj')
+    parser.add_argument('--object_path', type=str, default='/home/dareum/cs586/data/meshdata_exp/bottle/coacd/decomposed.obj')
     parser.add_argument('--result_path', type=str, default='../data/bimanual_graspdata')
     parser.add_argument('--output_file', type=str, default='bimanual_grasp_result.html')
     args = parser.parse_args()
@@ -182,7 +182,7 @@ if __name__ == '__main__':
 
     # Create object model
     object_model = ObjectModel(
-        data_root_path='../data/meshdata_one',
+        data_root_path='../data/meshdata_exp',
         batch_size_each=1,
         num_samples=2000, 
         device=device

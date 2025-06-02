@@ -215,12 +215,14 @@ weight_dict = dict(
     w_joints=args.w_joints,
     w_bimpen=args.w_bimpen,  # NEW
     w_vew=args.w_vew,        # NEW
+    w_gravity_support=0.0,   # NEW - weight 0 to not affect current behavior  
+    w_vertical_stability=0.0, # NEW - weight 0 to not affect current behavior
 )
 
 # Enable gradient tracking for bimanual pose
 bimanual_hand_model.bimanual_pose.requires_grad_(True)
 
-energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew = cal_bimanual_energy(
+energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_gravity_support, E_vertical_stability = cal_bimanual_energy(
     bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
 energy.sum().backward(retain_graph=True)
@@ -236,7 +238,7 @@ for step in tqdm(range(1, args.n_iter + 1), desc='optimizing bimanual grasps'):
     s = optimizer.try_step()
 
     optimizer.zero_grad()
-    new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew = cal_bimanual_energy(
+    new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep, new_E_gravity_support, new_E_vertical_stability = cal_bimanual_energy(
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
     new_energy.sum().backward(retain_graph=True)
@@ -252,6 +254,9 @@ for step in tqdm(range(1, args.n_iter + 1), desc='optimizing bimanual grasps'):
         E_joints[accept] = new_E_joints[accept]
         E_bimpen[accept] = new_E_bimpen[accept]
         E_vew[accept] = new_E_vew[accept]
+        E_contact_sep[accept] = new_E_contact_sep[accept]
+        E_gravity_support[accept] = new_E_gravity_support[accept]
+        E_vertical_stability[accept] = new_E_vertical_stability[accept]
 
         # Log every 100 steps
         if step % 100 == 0:
@@ -351,6 +356,9 @@ for i in range(len(args.object_code_list)):
             E_joints=E_joints[idx].item(),
             E_bimpen=E_bimpen[idx].item(),  # NEW
             E_vew=E_vew[idx].item(),        # NEW
+            E_contact_sep=E_contact_sep[idx].item(),    # NEW
+            E_gravity_support=E_gravity_support[idx].item(),     # NEW
+            E_vertical_stability=E_vertical_stability[idx].item(), # NEW
         ))
     np.save(os.path.join(result_path, 'bimanual_' + args.object_code_list[i] + '.npy'), data_list, allow_pickle=True)
 

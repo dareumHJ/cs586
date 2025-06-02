@@ -25,7 +25,7 @@ import json
 # from utils.hand_model import HandModel
 from utils.bimanual_hand_model import BimanualHandModel
 from utils.object_model import ObjectModel
-from utils.bimanual_initializations import initialize_bimanual_convex_hull
+from utils.bimanual_initializations_new import initialize_bimanual_convex_hull
 from utils.bimanual_energy import cal_bimanual_energy
 from utils.rot6d import robust_compute_rotation_matrix_from_ortho6d
 
@@ -369,14 +369,15 @@ def generate(args_list):
         w_vew=args.w_vew,        # NEW: Wrench ellipse volume
         w_contact_sep=args.w_contact_sep,
         separation_threshold=args.separation_threshold,
-        w_role_based=args.w_role_based    # NEW: Role-based energy weight
+        w_gravity_support=args.w_gravity_support,    # NEW: Gravity support energy
+        w_vertical_stability=args.w_vertical_stability  # NEW: Vertical stability energy
     )
     
     # IMPORTANT: Reset gradient to None before initial calculation
     bimanual_hand_model.bimanual_pose.grad = None
     
     # Calculate initial energy with proper gradient tracking
-    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_support, E_stabilize = cal_bimanual_energy(
+    energy, E_fc, E_dis, E_pen, E_spen, E_joints, E_bimpen, E_vew, E_contact_sep, E_gravity_support, E_vertical_stability = cal_bimanual_energy(
         bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
     # Ensure gradient calculation is working by computing scalar loss
@@ -424,8 +425,8 @@ def generate(args_list):
             "initial/E_bimpen_mean": E_bimpen.mean().item(),
             "initial/E_vew_mean": E_vew.mean().item(),
             "initial/E_contact_sep_mean": E_contact_sep.mean().item(),
-            "initial/E_support_mean": E_support.mean().item(),
-            "initial/E_stabilize_mean": E_stabilize.mean().item(),
+            "initial/E_gravity_support_mean": E_gravity_support.mean().item(),
+            "initial/E_vertical_stability_mean": E_vertical_stability.mean().item(),
             "initial/gradient_norm": initial_grad_norm,
             "step": 0
         }
@@ -474,7 +475,7 @@ def generate(args_list):
             actual_step_taken = torch.norm(pose_after_try_step.detach() - pose_before_step.detach(), dim=1).mean().item()
 
         optimizer.zero_grad()
-        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep, new_E_support, new_E_stabilize = cal_bimanual_energy(
+        new_energy, new_E_fc, new_E_dis, new_E_pen, new_E_spen, new_E_joints, new_E_bimpen, new_E_vew, new_E_contact_sep, new_E_gravity_support, new_E_vertical_stability = cal_bimanual_energy(
             bimanual_hand_model, object_model, verbose=True, **weight_dict)
 
         # new_energy.sum().backward(retain_graph=True)
@@ -482,6 +483,7 @@ def generate(args_list):
 
         # Accept step without disabling gradients
         accept, t = optimizer.accept_step(energy, new_energy)
+        # accept, t = optimizer.accept_step(E_pen, new_E_pen)
 
         # Check if pose actually changed after accept/reject decision - only detach for logging
         with torch.no_grad():
@@ -498,8 +500,8 @@ def generate(args_list):
         E_bimpen = torch.where(accept, new_E_bimpen, E_bimpen)
         E_vew = torch.where(accept, new_E_vew, E_vew)
         E_contact_sep = torch.where(accept, new_E_contact_sep, E_contact_sep)
-        E_support = torch.where(accept, new_E_support, E_support)
-        E_stabilize = torch.where(accept, new_E_stabilize, E_stabilize)
+        E_gravity_support = torch.where(accept, new_E_gravity_support, E_gravity_support)
+        E_vertical_stability = torch.where(accept, new_E_vertical_stability, E_vertical_stability)
         
         # Detailed step analysis for logging (use detach only for logging)
         with torch.no_grad():
@@ -549,7 +551,7 @@ def generate(args_list):
             
             # DEBUG: Log individual energy components to see what's changing
             logger.info(f"  Energy Components - FC: {new_E_fc.mean().item():.4f}, Dis: {new_E_dis.mean().item():.4f}, Pen: {new_E_pen.mean().item():.4f}")
-            logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}, SEP: {new_E_contact_sep.mean().item():.4f}, SUP: {new_E_support.mean().item():.4f}, STAB: {new_E_stabilize.mean().item():.4f}")
+            logger.info(f"  Energy Components - SPen: {new_E_spen.mean().item():.4f}, Joints: {new_E_joints.mean().item():.4f}, Bim: {new_E_bimpen.mean().item():.4f}, VEW: {new_E_vew.mean().item():.4f}, SEP: {new_E_contact_sep.mean().item():.4f}, GRAV: {new_E_gravity_support.mean().item():.4f}, VERT: {new_E_vertical_stability.mean().item():.4f}")
             
             # DEBUG: Check if contact points are actually changing
             if step > 1 and hasattr(bimanual_hand_model, 'contact_points') and bimanual_hand_model.contact_points is not None:
@@ -627,11 +629,11 @@ def generate(args_list):
                     "energy/E_contact_sep_mean": E_contact_sep.mean().item(),
                     "energy/E_contact_sep_std": E_contact_sep.std().item(),
 
-                    "energy/E_support_mean": E_support.mean().item(),
-                    "energy/E_support_std": E_support.std().item(),
+                    "energy/E_gravity_support_mean": E_gravity_support.mean().item(),
+                    "energy/E_gravity_support_std": E_gravity_support.std().item(),
 
-                    "energy/E_stabilize_mean": E_stabilize.mean().item(),
-                    "energy/E_stabilize_std": E_stabilize.std().item(),
+                    "energy/E_vertical_stability_mean": E_vertical_stability.mean().item(),
+                    "energy/E_vertical_stability_std": E_vertical_stability.std().item(),
                 }
                 
                 # Add percentage of successful grasps (below thresholds)
@@ -738,8 +740,8 @@ def generate(args_list):
                 E_bimpen=E_bimpen[idx].item(),  # NEW
                 E_vew=E_vew[idx].item(),        # NEW
                 E_contact_sep=E_contact_sep[idx].item(), # NEW
-                E_support=E_support[idx].item(),    # NEW
-                E_stabilize=E_stabilize[idx].item()  # NEW
+                E_gravity_support=E_gravity_support[idx].item(),    # NEW
+                E_vertical_stability=E_vertical_stability[idx].item()  # NEW
             ))
         
         # Sort data_list by total energy (ascending order - lowest energy first)
@@ -764,8 +766,8 @@ def generate(args_list):
             "final/E_bimpen_mean": E_bimpen.mean().item(),
             "final/E_vew_mean": E_vew.mean().item(),
             "final/E_contact_sep_mean": E_contact_sep.mean().item(),
-            "final/E_support_mean": E_support.mean().item(),
-            "final/E_stabilize_mean": E_stabilize.mean().item(),
+            "final/E_gravity_support_mean": E_gravity_support.mean().item(),
+            "final/E_vertical_stability_mean": E_vertical_stability.mean().item(),
             "final/good_fc_pct": (E_fc < args.thres_fc).float().mean().item() * 100,
             "final/good_dis_pct": (E_dis < args.thres_dis).float().mean().item() * 100,
             "final/good_pen_pct": (E_pen < args.thres_pen).float().mean().item() * 100,
@@ -787,7 +789,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     # experiment settings
     parser.add_argument('--result_path', default="../data/bimanual_graspdata", type=str)
-    parser.add_argument('--data_root_path', default="../data/meshdata_one", type=str)
+    parser.add_argument('--data_root_path', default="../data/meshdata_exp", type=str)
     parser.add_argument('--object_code_list', nargs='*', type=str)
     parser.add_argument('--all', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
@@ -836,14 +838,14 @@ if __name__ == '__main__':
         args.w_vew = config.get('w_vew', 1.0)
         args.w_contact_sep = config.get('w_contact_sep', 10.0)
         args.separation_threshold = config.get('separation_threshold', 0.025)
-        args.w_role_based = config.get('w_role_based', 10.0)
+        args.w_gravity_support = config.get('w_gravity_support', 0.0)
+        args.w_vertical_stability = config.get('w_vertical_stability', 0.0)
         args.fixed_scale = config.get('fixed_scale', 0.1)
         args.stage2 = config.get('stage2', -1)  # NEW: Stage2 iteration switch
         args.stage2_weight = config.get('stage2_weight', {})  # NEW: Stage2 weights
         print(f'Loaded config: n_iter = {args.n_iter}')
         print(f'Loaded config: w_dis = {args.w_dis}, w_pen = {args.w_pen}, w_spen = {args.w_spen}')
         print(f'Loaded config: w_joints = {args.w_joints}, w_bimpen = {args.w_bimpen}, w_vew = {args.w_vew}, w_contact_sep = {args.w_contact_sep}, separation_threshold = {args.separation_threshold}')
-        print(f'Loaded config: w_role_based = {args.w_role_based}')
         print(f'Loaded config: stage2 = {args.stage2}, stage2_enabled = {args.stage2 > 0}')
     except FileNotFoundError:
         print("Warning: config.json not found, using default values")
@@ -856,7 +858,6 @@ if __name__ == '__main__':
         args.w_vew = 1.0
         args.w_contact_sep = 15.0
         args.separation_threshold = 0.025
-        args.w_role_based = 10.0
         args.fixed_scale = 0.1
         args.stage2 = -1
         args.stage2_weight = {}
